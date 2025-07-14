@@ -1,0 +1,106 @@
+plugins {
+    id 'java'
+    id 'com.google.protobuf' version '0.9.4'
+    // Apply the application plugin to add support for building a CLI application in Java.
+    id 'application'
+}
+
+group = 'com.example'
+version = '1.0'
+
+repositories {
+    // Use Maven Central for resolving dependencies.
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'javax.annotation:javax.annotation-api:1.3.2'
+    implementation 'io.grpc:grpc-netty-shaded:1.63.0'
+    implementation 'io.grpc:grpc-protobuf:1.63.0'
+    implementation 'io.grpc:grpc-stub:1.63.0'
+    implementation 'com.google.protobuf:protobuf-java:3.25.3'
+
+    // For logging, optional
+    implementation 'org.slf4j:slf4j-simple:2.0.12'
+
+    // Use JUnit test framework.
+    testImplementation libs.junit
+
+    // This dependency is used by the application.
+    implementation libs.guava
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.3"
+    }
+    plugins {
+        grpc {
+            artifact = 'io.grpc:protoc-gen-grpc-java:1.63.0'
+        }
+    }
+    generateProtoTasks {
+        all().each { task ->
+            task.plugins {
+                grpc {}
+            }
+        }
+    }
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'org.example.App'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+task fatjar(type:Jar) {
+    archiveBaseName.set('app')                   // base name
+    archiveVersion.set(version)                   // version e.g. 1.0
+    archiveClassifier.set('fat')                  // classifier "fat" → name ends with -fat.jar
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes 'Main-Class': 'org.example.App'  // replace with your main class
+    }
+
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}
+
+sourceSets {
+    main {
+        proto {
+            srcDirs = ['../proto/proto'] // relative to project root
+        }
+    }
+}
+
+// Apply a specific Java toolchain to ease working on different environments.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    // Define the main class for the application.
+    mainClass = 'org.example.App'
+}
+tasks.register('copyJarToRoot', Copy) {
+    dependsOn jar
+    from(jar.archiveFile) // this is a Provider<RegularFile>
+    into("$rootDir/output")  // safer than rootDir itself
+}
+
+tasks.register('copyFatJarToRoot', Copy) {
+    dependsOn fatjar
+    from(fatjar.archiveFile)
+    into("$rootDir/output")
+}
+build.finalizedBy('copyJarToRoot', 'copyFatJarToRoot')

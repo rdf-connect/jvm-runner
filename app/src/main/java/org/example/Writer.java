@@ -8,12 +8,11 @@ import com.google.protobuf.ByteString;
 /**
  * Writer
  */
-public class Writer implements IWriter {
-    private String id;
+public class Writer extends IWriter {
     private Runner runner;
 
-    Writer(String id, Runner runner) {
-        this.id = id;
+    public Writer(String id, Runner runner) {
+        super(id);
         this.runner = runner;
     }
 

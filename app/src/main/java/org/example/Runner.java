@@ -31,7 +31,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
     protected HashMap<String, Reader> channels = new HashMap<>();
 
-    Runner(RunnerGrpc.RunnerStub stub) {
+    public Runner(RunnerGrpc.RunnerStub stub) {
         this.stream = stub.connect(this);
         this.stub = stub;
     }

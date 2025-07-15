@@ -2,12 +2,18 @@ package org.example;
 
 import com.google.protobuf.ByteString;
 
-public interface IWriter {
-    void msg(ByteString buffer);
+public abstract class IWriter {
+    String id;
 
-    Stream stream();
+    public IWriter(String id) {
+        this.id = id;
+    }
 
-    void close();
+    abstract void msg(ByteString buffer);
+
+    abstract Stream stream();
+
+    abstract void close();
 
     public static interface Stream {
         void push(ByteString chunk);

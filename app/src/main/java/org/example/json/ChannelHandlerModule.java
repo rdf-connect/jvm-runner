@@ -24,7 +24,7 @@ public class ChannelHandlerModule extends SimpleModule {
     public ChannelHandlerModule(Runner runner) {
         super("ChannelHandlerModule");
         this.runner = runner;
-        addDeserializer(IReader.class, new ReaderDeserializer());
+        addDeserializer(IReader.class, new ReaderDeserializer(runner));
         addDeserializer(IWriter.class, new WriterDeserializer(runner));
 
         // DynamicJsonLdDeserializer dynamic = new DynamicJsonLdDeserializer();
@@ -52,6 +52,12 @@ public class ChannelHandlerModule extends SimpleModule {
     }
 
     private static class ReaderDeserializer extends JsonDeserializer<Reader> {
+        private final Runner runner;
+
+        ReaderDeserializer(Runner runner) {
+            this.runner = runner;
+        }
+
         @Override
         public Reader deserialize(JsonParser p, DeserializationContext ctxt)
                 throws IOException, JsonProcessingException {
@@ -67,9 +73,11 @@ public class ChannelHandlerModule extends SimpleModule {
                 if (typeNode != null && typeNode.isTextual()) {
                     String type = typeNode.asText();
 
-                    if ("http://example.com/ns#Reader".equals(type)) {
+                    if ("https://w3id.org/rdf-connect#Reader".equals(type)) {
                         String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
-                        return new Reader(id);
+                        var out = new Reader(id);
+                        this.runner.setReader(id, out);
+                        return out;
                     }
                 }
             }
@@ -101,7 +109,7 @@ public class ChannelHandlerModule extends SimpleModule {
                 if (typeNode != null && typeNode.isTextual()) {
                     String type = typeNode.asText();
 
-                    if ("http://example.com/ns#Writer".equals(type)) {
+                    if ("https://w3id.org/rdf-connect#Writer".equals(type)) {
                         String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
                         return new Writer(id, this.runner);
                     }

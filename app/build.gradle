@@ -1,6 +1,7 @@
 plugins {
     id 'java'
     id 'com.google.protobuf' version '0.9.4'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
     // Apply the application plugin to add support for building a CLI application in Java.
     id 'application'
 }
@@ -19,9 +20,10 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
 
     implementation 'javax.annotation:javax.annotation-api:1.3.2'
-    implementation 'io.grpc:grpc-netty-shaded:1.63.0'
+    implementation 'io.grpc:grpc-netty:1.63.0' // or latest version
     implementation 'io.grpc:grpc-protobuf:1.63.0'
     implementation 'io.grpc:grpc-stub:1.63.0'
+    implementation 'io.grpc:grpc-core:1.63.0'
     implementation 'com.google.protobuf:protobuf-java:4.28.2'
 
     // For logging, optional
@@ -63,19 +65,17 @@ jar {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-task fatjar(type:Jar) {
+
+shadowJar {
     dependsOn(':types:jar')
-    archiveBaseName.set('app')                   // base name
-    archiveVersion.set(version)                   // version e.g. 1.0
-    archiveClassifier.set('fat')                  // classifier "fat" → name ends with -fat.jar
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    archiveBaseName.set('app')
+    archiveClassifier.set('fat') // Removes `-all` from default
+    archiveVersion.set(version)
 
+    mergeServiceFiles()  // <- crucial!
+    // Optional: set main class for executable JAR
     manifest {
-        attributes 'Main-Class': 'org.example.App'  // replace with your main class
-    }
-
-    from {
-        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+        attributes 'Main-Class': 'org.example.Main'
     }
 }
 
@@ -106,8 +106,8 @@ tasks.register('copyJarToRoot', Copy) {
 }
 
 tasks.register('copyFatJarToRoot', Copy) {
-    dependsOn fatjar
-    from(fatjar.archiveFile)
+    dependsOn shadowJar
+    from(shadowJar.archiveFile)
     into("$rootDir/output")
 }
 build.finalizedBy('copyJarToRoot', 'copyFatJarToRoot')

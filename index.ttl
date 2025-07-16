@@ -1,0 +1,30 @@
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix sds: <https://w3id.org/sds#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+sds:implementationOf rdfs:subPropertyOf rdfs:subClassOf.
+rdfc:javaImplementationOf rdfs:subPropertyOf sds:implementationOf.
+#
+rdfc:JvmRunner a rdfc:Runner;
+  rdfc:handlesSubjectsOf rdfc:javaImplementationOf;
+  rdfc:command "java -jar /home/silvius/Projects/jvm-runner/output/app-1.0-fat.jar";
+  rdfc:processor_definition <JavaProcessorShape>.
+
+[ ] a sh:NodeShape;
+  sh:targetSubjectsOf rdfc:javaImplementationOf;
+  sh:property [
+    sh:path rdfc:jar;
+    sh:name "jar";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ], [
+    sh:path rdfc:class;
+    sh:name "clazz";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ].
+

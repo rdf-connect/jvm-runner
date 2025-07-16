@@ -11,6 +11,7 @@ import java.util.function.Consumer;
 
 import org.example.json.ChannelHandlerModule;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.type.TypeFactory;
 import com.google.protobuf.ByteString;
@@ -42,53 +43,80 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
     protected final ObjectMapper mapper;
 
-    public Runner(RunnerGrpc.RunnerStub stub) {
+    public Runner(RunnerGrpc.RunnerStub stub, String uri) {
         this.stream = stub.connect(this);
         this.stub = stub;
         this.mapper = new ObjectMapper();
         this.mapper.registerModule(new ChannelHandlerModule(this));
+        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+        this.sendIdentify(uri);
+    }
+
+    public void setReader(String uri, Reader reader) {
+        this.channels.put(uri, reader);
     }
 
     @Override
     public void onNext(RunnerMessage value) {
+        if (value.hasPipeline()) {
+            System.out.println("Pipeline message");
+            return;
+        }
         if (value.hasMsg()) {
+            System.out.println("Msg message");
             var msg = value.getMsg();
             var data = msg.getData();
             var reader = this.channels.get(msg.getChannel());
-            reader.msg(data);
+            if (reader != null) {
+                reader.msg(data);
+            } else {
+                System.out.println("Channel " + msg.getChannel() + " not present.");
+            }
             return;
         }
 
         if (value.hasStreamMsg()) {
+            System.out.println("Stream Msg message");
             var msg = value.getStreamMsg();
             var id = msg.getId();
 
             var channel = this.channels.get(msg.getChannel());
             if (channel != null) {
                 this.stub.receiveStreamMessage(id, channel.stream());
+            } else {
+                System.out.println("Channel " + msg.getChannel() + " not present.");
             }
+
             return;
         }
 
         if (value.hasClose()) {
+            System.out.println("Close message");
             var msg = value.getClose();
             var channel = this.channels.get(msg.getChannel());
             if (channel != null) {
                 channel.close();
+            } else {
+                System.out.println("Channel " + msg.getChannel() + " not present.");
             }
+
             return;
         }
 
         if (value.hasStart()) {
+            System.out.println("Start message");
             this.processors.forEach((k, v) -> {
                 v.produce(st -> {
                     System.out.println("Processor Produced " + k);
                     // TODO: do something
                 });
             });
+            return;
         }
 
         if (value.hasProc()) {
+            System.out.println("Proc start message");
             var proc = value.getProc();
             var uri = proc.getUri();
             try {
@@ -101,8 +129,10 @@ public class Runner implements StreamObserver<RunnerMessage> {
                     this.sendProcInit(uri, Optional.empty());
                 });
             } catch (Exception e) {
+                e.printStackTrace();
                 this.sendProcInit(uri, Optional.of(e.toString()));
             }
+            return;
         }
 
         System.err.println("Unsupported message " + value.getUnknownFields());
@@ -112,9 +142,10 @@ public class Runner implements StreamObserver<RunnerMessage> {
         var uri = proc.getUri();
         var config = proc.getConfig();
         var params = proc.getArguments();
+        System.out.println("Trying to start proc " + uri + " " + config + " " + params);
 
         var arg = mapper.readValue(config, Config.class);
-        var processor = arg.loadClass(this.mapper, params);
+        var processor = arg.loadClass(this, params);
 
         this.processors.put(uri, processor);
 
@@ -131,6 +162,12 @@ public class Runner implements StreamObserver<RunnerMessage> {
     public void onCompleted() {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'onCompleted'");
+    }
+
+    void sendIdentify(String uri) {
+        var builder = OrchestratorMessage.newBuilder();
+        builder.setIdentify(rdfc.Orchestrator.Identify.newBuilder().setUri(uri));
+        this.stream.onNext(builder.build());
     }
 
     void sendProcInit(String uri, Optional<String> error) {
@@ -212,11 +249,14 @@ public class Runner implements StreamObserver<RunnerMessage> {
         public String jar;
         public String clazz;
 
-        Processor<?> loadClass(ObjectMapper mapper, String arguments) throws Exception {
+        Processor<?> loadClass(Runner runner, String arguments) throws Exception {
             URL jarUrl = new URL(this.jar);
             try (URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, App.class.getClassLoader())) {
                 Class<?> clazz = loader.loadClass(this.clazz);
 
+                var mapper = new ObjectMapper();
+                mapper.registerModule(new ChannelHandlerModule(runner));
+                mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
                 mapper.setTypeFactory(TypeFactory.defaultInstance().withClassLoader(loader));
                 // Find constructor with one argument
                 Constructor<?> constructor = null;

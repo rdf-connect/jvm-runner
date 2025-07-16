@@ -6,12 +6,12 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 
-public abstract class IReader {
-    public String id = "";
+public interface IReader {
+    String id();
 
-    abstract Iter<Iter<ByteString>> streams();
+    Iter<Iter<ByteString>> streams();
 
-    abstract Iter<ByteString> buffers();
+    Iter<ByteString> buffers();
 
     public static abstract class Iter<T> {
         protected List<Consumer<Optional<T>>> callbacks = new ArrayList<>();

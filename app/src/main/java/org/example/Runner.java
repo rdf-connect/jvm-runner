@@ -1,24 +1,32 @@
 package org.example;
 
+import java.lang.reflect.Constructor;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 
+import org.example.json.ChannelHandlerModule;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.type.TypeFactory;
 import com.google.protobuf.ByteString;
 
 import io.grpc.stub.StreamObserver;
-import rdfc.Orchestrator.OrchestratorMessage;
-import rdfc.Runner.RunnerMessage;
-import rdfc.RunnerGrpc.RunnerStub;
-import rdfc.RunnerGrpc;
 import rdfc.Common;
 import rdfc.Common.Close;
 import rdfc.Common.DataChunk;
 import rdfc.Common.Id;
 import rdfc.Common.Message;
 import rdfc.Common.StreamMessage;
+import rdfc.Orchestrator.OrchestratorMessage;
+import rdfc.Orchestrator.ProcessorInit;
+import rdfc.Runner.RunnerMessage;
+import rdfc.RunnerGrpc;
+import rdfc.RunnerGrpc.RunnerStub;
 
 /**
  * Runner
@@ -30,18 +38,25 @@ public class Runner implements StreamObserver<RunnerMessage> {
     protected RunnerGrpc.RunnerStub stub;
 
     protected HashMap<String, Reader> channels = new HashMap<>();
+    protected HashMap<String, Processor<?>> processors = new HashMap<>();
+
+    protected final ObjectMapper mapper;
 
     public Runner(RunnerGrpc.RunnerStub stub) {
         this.stream = stub.connect(this);
         this.stub = stub;
+        this.mapper = new ObjectMapper();
+        this.mapper.registerModule(new ChannelHandlerModule(this));
     }
 
     @Override
     public void onNext(RunnerMessage value) {
         if (value.hasMsg()) {
             var msg = value.getMsg();
-            var channel = msg.getChannel();
             var data = msg.getData();
+            var reader = this.channels.get(msg.getChannel());
+            reader.msg(data);
+            return;
         }
 
         if (value.hasStreamMsg()) {
@@ -52,10 +67,58 @@ public class Runner implements StreamObserver<RunnerMessage> {
             if (channel != null) {
                 this.stub.receiveStreamMessage(id, channel.stream());
             }
+            return;
         }
 
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'onNext'");
+        if (value.hasClose()) {
+            var msg = value.getClose();
+            var channel = this.channels.get(msg.getChannel());
+            if (channel != null) {
+                channel.close();
+            }
+            return;
+        }
+
+        if (value.hasStart()) {
+            this.processors.forEach((k, v) -> {
+                v.produce(st -> {
+                    System.out.println("Processor Produced " + k);
+                    // TODO: do something
+                });
+            });
+        }
+
+        if (value.hasProc()) {
+            var proc = value.getProc();
+            var uri = proc.getUri();
+            try {
+                Processor<?> processor = this.startProc(proc);
+                processor.init(_void -> {
+                    processor.transform(st -> {
+                        System.out.println("Processor transformed " + uri);
+                        // TODO: do something
+                    });
+                    this.sendProcInit(uri, Optional.empty());
+                });
+            } catch (Exception e) {
+                this.sendProcInit(uri, Optional.of(e.toString()));
+            }
+        }
+
+        System.err.println("Unsupported message " + value.getUnknownFields());
+    }
+
+    private Processor<?> startProc(rdfc.Runner.Processor proc) throws Exception {
+        var uri = proc.getUri();
+        var config = proc.getConfig();
+        var params = proc.getArguments();
+
+        var arg = mapper.readValue(config, Config.class);
+        var processor = arg.loadClass(this.mapper, params);
+
+        this.processors.put(uri, processor);
+
+        return processor;
     }
 
     @Override
@@ -68,6 +131,16 @@ public class Runner implements StreamObserver<RunnerMessage> {
     public void onCompleted() {
         // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'onCompleted'");
+    }
+
+    void sendProcInit(String uri, Optional<String> error) {
+        var builder = OrchestratorMessage.newBuilder();
+        var initBuilder = ProcessorInit.newBuilder();
+        initBuilder.setUri(uri);
+        error.ifPresent(st -> initBuilder.setError(rdfc.Common.Error.newBuilder().setCause(st)));
+
+        builder.setInit(initBuilder);
+        this.stream.onNext(builder.build());
     }
 
     void sendMessage(String channel, ByteString data) {
@@ -133,6 +206,41 @@ public class Runner implements StreamObserver<RunnerMessage> {
         public void onCompleted() {
             throw new UnsupportedOperationException("Unimplemented method 'onCompleted'");
         }
+    }
 
+    private static class Config {
+        public String jar;
+        public String clazz;
+
+        Processor<?> loadClass(ObjectMapper mapper, String arguments) throws Exception {
+            URL jarUrl = new URL(this.jar);
+            try (URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, App.class.getClassLoader())) {
+                Class<?> clazz = loader.loadClass(this.clazz);
+
+                mapper.setTypeFactory(TypeFactory.defaultInstance().withClassLoader(loader));
+                // Find constructor with one argument
+                Constructor<?> constructor = null;
+                for (Constructor<?> c : clazz.getConstructors()) {
+                    if (c.getParameterCount() == 1) {
+                        constructor = c;
+                        break;
+                    }
+                }
+                if (constructor == null) {
+                    throw new RuntimeException("No single-arg constructor found");
+                }
+
+                Class<?> paramType = constructor.getParameterTypes()[0];
+
+                System.out.println("Found type " + paramType.getTypeName());
+
+                // Use Jackson to deserialize JSON into the param type
+                Object arg = mapper.readValue(arguments, paramType);
+
+                // Instantiate using default constructor
+                constructor.setAccessible(true);
+                return (Processor<?>) constructor.newInstance(arg);
+            }
+        }
     }
 }

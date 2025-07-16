@@ -10,6 +10,5 @@ plugins {
     id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
 }
 
-rootProject.name = 'jvm-runner'
-include('app', 'types')
-project(':types').projectDir = file('types/lib')
+rootProject.name = 'types'
+include('lib')

@@ -8,12 +8,18 @@ import com.google.protobuf.ByteString;
 /**
  * Writer
  */
-public class Writer extends IWriter {
+public class Writer implements IWriter {
     private Runner runner;
+    public String id;
 
     public Writer(String id, Runner runner) {
-        super(id);
+        this.id = id;
         this.runner = runner;
+    }
+
+    @Override
+    public String id() {
+        return this.id;
     }
 
     @Override

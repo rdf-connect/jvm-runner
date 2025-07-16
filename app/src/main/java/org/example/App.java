@@ -1,10 +1,14 @@
 package org.example;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.net.URL;
+import java.net.URLClassLoader;
 
 import org.example.json.ChannelHandlerModule;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.type.TypeFactory;
 import com.google.protobuf.ByteString;
 
 import io.grpc.ManagedChannel;
@@ -25,7 +29,7 @@ public class App {
         return "Hello World!";
     }
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws Exception {
         System.out.println(new App().getGreeting());
         ManagedChannel channel = ManagedChannelBuilder.forTarget("localhost:50051")
                 .usePlaintext()
@@ -37,11 +41,13 @@ public class App {
         Runner runner = new Runner(stub);
         mapper.registerModule(new ChannelHandlerModule(runner));
 
-        App inputArg = mapper.readValue(
-                "{  \"name\": \"Arthur\",  \"reader\": { \"@type\": \"http://example.com/ns#Reader\", \"@id\": \"someReader\" }, \"writer\": { \"@type\": \"http://example.com/ns#Writer\", \"@id\": \"someWriter\" } }",
-                App.class);
-
-        System.out.println(inputArg.name + " " + inputArg.reader.id + "  " + inputArg.writer.id);
+        var json = "{  \"name\": \"Arthur\",  \"reader\": { \"@type\": \"http://example.com/ns#Reader\", \"@id\": \"someReader\" }, \"writer\": { \"@type\": \"http://example.com/ns#Writer\", \"@id\": \"someWriter\" } }";
+        loadClassFromJar("/tmp/testProc/lib/build/libs/lib.jar", "rdfc.proc.Library", mapper, json);
+        // App inputArg = mapper.readValue(
+        // App.class);
+        //
+        // System.out.println(inputArg.name + " " + inputArg.reader.id() + " " +
+        // inputArg.writer.id());
 
         //
         // StreamObserver<RunnerMessage> responseObserver = new
@@ -79,5 +85,38 @@ public class App {
         //
         // // when done sending
         // requestObserver.onCompleted();
+    }
+
+    public static Object loadClassFromJar(String jarPath, String className, ObjectMapper mapper, String json)
+            throws Exception {
+
+        URL jarUrl = new URL("file://" + jarPath);
+        try (URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, App.class.getClassLoader())) {
+            Class<?> clazz = loader.loadClass(className);
+
+            mapper.setTypeFactory(TypeFactory.defaultInstance().withClassLoader(loader));
+            // Find constructor with one argument
+            Constructor<?> constructor = null;
+            for (Constructor<?> c : clazz.getConstructors()) {
+                if (c.getParameterCount() == 1) {
+                    constructor = c;
+                    break;
+                }
+            }
+            if (constructor == null) {
+                throw new RuntimeException("No single-arg constructor found");
+            }
+
+            Class<?> paramType = constructor.getParameterTypes()[0];
+
+            System.out.println("Found type " + paramType.getTypeName());
+
+            // Use Jackson to deserialize JSON into the param type
+            Object arg = mapper.readValue(json, paramType);
+
+            // Instantiate using default constructor
+            constructor.setAccessible(true);
+            return constructor.newInstance(arg);
+        }
     }
 }

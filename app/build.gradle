@@ -14,6 +14,7 @@ repositories {
 }
 
 dependencies {
+    implementation project(":types")
     implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
 
@@ -52,6 +53,7 @@ protobuf {
 }
 
 jar {
+    dependsOn(':types:jar')
     manifest {
         attributes 'Main-Class': 'org.example.App'
     }
@@ -62,6 +64,7 @@ jar {
 }
 
 task fatjar(type:Jar) {
+    dependsOn(':types:jar')
     archiveBaseName.set('app')                   // base name
     archiveVersion.set(version)                   // version e.g. 1.0
     archiveClassifier.set('fat')                  // classifier "fat" → name ends with -fat.jar
@@ -95,6 +98,7 @@ application {
     // Define the main class for the application.
     mainClass = 'org.example.App'
 }
+
 tasks.register('copyJarToRoot', Copy) {
     dependsOn jar
     from(jar.archiveFile) // this is a Provider<RegularFile>
@@ -107,3 +111,4 @@ tasks.register('copyFatJarToRoot', Copy) {
     into("$rootDir/output")
 }
 build.finalizedBy('copyJarToRoot', 'copyFatJarToRoot')
+

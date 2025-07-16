@@ -10,12 +10,19 @@ import com.google.protobuf.ByteString;
 /**
  * Channel
  */
-public class Reader extends IReader {
+public class Reader implements IReader {
+    private String id;
+
     private List<StreamIter<Iter<ByteString>>> streams = new ArrayList<>();
     private List<StreamIter<ByteString>> strings = new ArrayList<>();
 
     public Reader(String id) {
         this.id = id;
+    }
+
+    @Override
+    public String id() {
+        return this.id;
 
     }
 

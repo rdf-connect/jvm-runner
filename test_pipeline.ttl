@@ -18,7 +18,7 @@
 
 rdfc:TestProcessor rdfc:javaImplementationOf rdfc:Processor;
   rdfc:class "rdfc.proc.Library";
-  rdfc:jar </tmp/testProc/lib/build/libs/lib.jar>.
+  rdfc:jar <./test-processor/lib/build/libs/lib.jar>.
 
 [ ] a sh:NodeShape;
   sh:targetClass rdfc:TestProcessor;

@@ -19,36 +19,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 
 public class ChannelHandlerModule extends SimpleModule {
-    private final Runner runner;
-
     public ChannelHandlerModule(Runner runner) {
         super("ChannelHandlerModule");
-        this.runner = runner;
         addDeserializer(IReader.class, new ReaderDeserializer(runner));
         addDeserializer(IWriter.class, new WriterDeserializer(runner));
-
-        // DynamicJsonLdDeserializer dynamic = new DynamicJsonLdDeserializer();
-        // dynamic.register("http://example.com/ns#Reader", this::buildReader);
-        // dynamic.register("http://example.com/ns#Writer", this::buildWriter);
-        // addDeserializer(Object.class, dynamic);
-        //
-        // addAbstractTypeMapping(IReader.class, Reader.class);
-        // addAbstractTypeMapping(IWriter.class, Writer.class);
-
-    }
-
-    private Reader buildReader(JsonNode node) {
-        JsonNode idNode = node.get("@id");
-        String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
-        return new Reader(id);
-
-    }
-
-    private Writer buildWriter(JsonNode node) {
-        JsonNode idNode = node.get("@id");
-        String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
-        return new Writer(id, this.runner);
-
     }
 
     private static class ReaderDeserializer extends JsonDeserializer<Reader> {

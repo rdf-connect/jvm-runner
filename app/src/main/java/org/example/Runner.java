@@ -1,6 +1,7 @@
 package org.example;
 
 import java.lang.reflect.Constructor;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.ArrayList;
@@ -250,7 +251,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
         public String clazz;
 
         Processor<?> loadClass(Runner runner, String arguments) throws Exception {
-            URL jarUrl = new URL(this.jar);
+            URL jarUrl = new URI(this.jar).toURL();
             try (URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, App.class.getClassLoader())) {
                 Class<?> clazz = loader.loadClass(this.clazz);
 

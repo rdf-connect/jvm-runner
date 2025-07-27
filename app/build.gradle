@@ -24,7 +24,7 @@ dependencies {
     implementation 'io.grpc:grpc-protobuf:1.63.0'
     implementation 'io.grpc:grpc-stub:1.63.0'
     implementation 'io.grpc:grpc-core:1.63.0'
-    implementation 'com.google.protobuf:protobuf-java:4.28.2'
+    implementation 'com.google.protobuf:protobuf-java:4.31.1'
 
     // For logging, optional
     implementation 'org.slf4j:slf4j-simple:2.0.12'
@@ -38,7 +38,7 @@ dependencies {
 
 protobuf {
     protoc {
-        artifact = "com.google.protobuf:protoc:3.25.3"
+        artifact = "com.google.protobuf:protoc:3.25.8"
     }
     plugins {
         grpc {

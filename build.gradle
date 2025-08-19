@@ -36,6 +36,7 @@ dependencies {
     runnerImplementation 'io.grpc:grpc-core:1.63.0'
 
     runnerImplementation 'com.google.protobuf:protobuf-java:4.28.2'
+    
     typesImplementation 'com.google.protobuf:protobuf-java:4.28.2'
 
     // For logging, optional
@@ -110,7 +111,7 @@ publishing {
         types(MavenPublication) {
             artifact tasks.typesJar
             artifact tasks.typesSourcesJar
-            artifact tasks.typesJavadocJar
+            // artifact tasks.typesJavadocJar
             groupId = project.group
             artifactId = "types"
             version = project.version
@@ -120,12 +121,6 @@ publishing {
             groupId = project.group
             artifactId = "descriptor"
             version = project.version
-        }
-    }
-
-    repositories {
-        maven {
-            url = uri("$buildDir/repo") // local repo test
         }
     }
 }

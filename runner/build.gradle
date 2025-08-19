@@ -21,5 +21,5 @@ dependencies {
     // For logging, optional
     implementation 'org.slf4j:slf4j-simple:2.0.12'
 
-    implementation libs.guava
+    implementation 'com.google.guava:guava:33.4.5-jre'
 }

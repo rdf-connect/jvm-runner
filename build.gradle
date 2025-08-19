@@ -1,3 +1,7 @@
+plugins {
+    // Apply the java-library plugin for API and implementation separation.
+    id 'maven-publish'   // ← this is required for `publishing { ... }`
+}
 
 allprojects {
     repositories {

@@ -1,17 +1,17 @@
 
 allprojects {
+    repositories {
+        mavenCentral()
+        maven { url = 'https://jitpack.io' }
+    }
+
     group = "io.github.rdf-connect"
     version = "0.0.3"
 }
 
 subprojects {
-	apply plugin: 'java'
-	apply plugin: 'maven-publish'
-	
-    repositories {
-        mavenCentral()
-        maven { url = 'https://jitpack.io' }
-    }
+    apply plugin: 'java'
+    apply plugin: 'maven-publish'
 
 	java {
 		withSourcesJar()

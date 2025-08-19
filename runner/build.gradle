@@ -1,3 +1,9 @@
+plugins {
+    // Apply the java-library plugin for API and implementation separation.
+    id 'java'
+    id 'maven-publish'   // ← this is required for `publishing { ... }`
+}
+
 dependencies {
     implementation project(path: ":types")
 	implementation 'com.github.rdf-connect:proto:9700abd'

@@ -1,3 +1,9 @@
+plugins {
+    // Apply the java-library plugin for API and implementation separation.
+    id 'java'
+    id 'maven-publish'   // ← this is required for `publishing { ... }`
+}
+
 dependencies {
     implementation 'com.google.protobuf:protobuf-java:4.28.2'
 }

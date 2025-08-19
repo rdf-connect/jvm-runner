@@ -1,4 +1,4 @@
-package org.example;
+package io.github.rdfc;
 
 import java.util.ArrayList;
 import java.util.List;

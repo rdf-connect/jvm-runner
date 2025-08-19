@@ -1,4 +1,4 @@
-package org.example.json;
+package io.github.rdfc.json;
 
 import java.io.IOException;
 import java.util.HashMap;

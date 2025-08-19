@@ -8,11 +8,7 @@
 plugins {
     // Apply the java-library plugin for API and implementation separation.
     id 'java-library'
-}
-
-repositories {
-    // Use Maven Central for resolving dependencies.
-    mavenCentral()
+    id 'maven-publish'   // ← this is required for `publishing { ... }`
 }
 
 dependencies {
@@ -23,5 +19,29 @@ dependencies {
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(11)
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            // publish regular jar with version
+            from components.java
+
+            groupId = project.group
+            artifactId = 'types'
+            version = project.version
+        }
+    }
+
+    repositories {
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/rdf-connect/jvm-runner")
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
     }
 }

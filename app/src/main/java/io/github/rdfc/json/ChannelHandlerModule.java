@@ -1,13 +1,13 @@
 
-package org.example.json;
+package io.github.rdfc.json;
 
 import java.io.IOException;
 
-import org.example.IReader;
-import org.example.IWriter;
-import org.example.Reader;
-import org.example.Runner;
-import org.example.Writer;
+import io.github.rdfc.IReader;
+import io.github.rdfc.IWriter;
+import io.github.rdfc.Reader;
+import io.github.rdfc.Runner;
+import io.github.rdfc.Writer;
 
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonParser;

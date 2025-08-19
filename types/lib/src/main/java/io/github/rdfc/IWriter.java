@@ -1,4 +1,4 @@
-package org.example;
+package io.github.rdfc;
 
 import com.google.protobuf.ByteString;
 

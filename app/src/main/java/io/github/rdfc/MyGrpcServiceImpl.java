@@ -1,4 +1,4 @@
-package org.example;
+package io.github.rdfc;
 
 import io.grpc.stub.StreamObserver;
 import rdfc.Orchestrator.OrchestratorMessage;

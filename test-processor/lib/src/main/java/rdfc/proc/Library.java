@@ -5,9 +5,9 @@ package rdfc.proc;
 
 import java.util.function.Consumer;
 
-import org.example.IReader;
-import org.example.IWriter;
-import org.example.Processor;
+import io.github.rdfc.IReader;
+import io.github.rdfc.IWriter;
+import io.github.rdfc.Processor;
 
 import com.google.protobuf.ByteString;
 

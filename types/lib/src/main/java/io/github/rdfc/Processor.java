@@ -1,4 +1,4 @@
-package org.example;
+package io.github.rdfc;
 
 import java.util.function.Consumer;
 

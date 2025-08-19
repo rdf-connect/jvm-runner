@@ -1,0 +1,8 @@
+allprojects {
+    group = 'io.github.rdf-connect'
+    version = '0.0.3'
+
+    repositories {
+        mavenCentral()
+    }
+}

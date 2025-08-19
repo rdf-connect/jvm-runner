@@ -1,4 +1,4 @@
-package org.example;
+package io.github.rdfc;
 
 import java.util.concurrent.TimeUnit;
 
@@ -6,7 +6,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import rdfc.RunnerGrpc;
 
-public class App {
+public class Rdfc {
     public String name;
     public IReader reader;
     public IWriter writer;

@@ -1,11 +1,11 @@
 
-package org.example;
+package io.github.rdfc;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
-import org.example.Reader.StreamIter;
+import io.github.rdfc.Reader.StreamIter;
 
 import com.google.protobuf.ByteString;
 

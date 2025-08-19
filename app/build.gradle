@@ -1,18 +1,12 @@
 plugins {
     id 'java'
+    id 'maven-publish'   // ← this is required for `publishing { ... }`
     id 'com.google.protobuf' version '0.9.4'
     id 'com.github.johnrengelman.shadow' version '8.1.1'
     // Apply the application plugin to add support for building a CLI application in Java.
     id 'application'
 }
 
-group = 'com.example'
-version = '1.0'
-
-repositories {
-    // Use Maven Central for resolving dependencies.
-    mavenCentral()
-}
 
 dependencies {
     implementation project(":types")
@@ -57,7 +51,7 @@ protobuf {
 jar {
     dependsOn(':types:jar')
     manifest {
-        attributes 'Main-Class': 'org.example.App'
+        attributes 'Main-Class': 'io.github.rdfc.Rdfc'
     }
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
@@ -68,14 +62,14 @@ jar {
 
 shadowJar {
     dependsOn(':types:jar')
-    archiveBaseName.set('app')
+    archiveBaseName.set('rdfc')
     archiveClassifier.set('fat') // Removes `-all` from default
-    archiveVersion.set(version)
+    archiveVersion.set("")
 
     mergeServiceFiles()  // <- crucial!
     // Optional: set main class for executable JAR
     manifest {
-        attributes 'Main-Class': 'org.example.Main'
+        attributes 'Main-Class': 'io.github.rdfc.Rdfc'
     }
 }
 
@@ -96,7 +90,7 @@ java {
 
 application {
     // Define the main class for the application.
-    mainClass = 'org.example.App'
+    mainClass = 'io.github.rdfc.Rdfc'
 }
 
 tasks.register('copyJarToRoot', Copy) {
@@ -110,5 +104,36 @@ tasks.register('copyFatJarToRoot', Copy) {
     from(shadowJar.archiveFile)
     into("$rootDir/output")
 }
+
 build.finalizedBy('copyJarToRoot', 'copyFatJarToRoot')
 
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            // publish regular jar with version
+            from components.java
+
+            // publish descriptor
+            artifact(file('../index.ttl')) {
+                classifier = 'index'
+                extension = 'ttl'
+                version = ""
+            }
+
+            groupId = project.group
+            artifactId = 'rdfc'
+            version = project.version
+        }
+    }
+
+    repositories {
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/rdf-connect/jvm-runner")
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
+}

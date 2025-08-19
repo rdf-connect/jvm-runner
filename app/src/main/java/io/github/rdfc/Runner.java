@@ -1,4 +1,4 @@
-package org.example;
+package io.github.rdfc;
 
 import java.lang.reflect.Constructor;
 import java.net.URI;
@@ -10,7 +10,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 
-import org.example.json.ChannelHandlerModule;
+import io.github.rdfc.Rdfc;
+import io.github.rdfc.json.ChannelHandlerModule;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -252,7 +253,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
         Processor<?> loadClass(Runner runner, String arguments) throws Exception {
             URL jarUrl = new URI(this.jar).toURL();
-            try (URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, App.class.getClassLoader())) {
+            try (URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, Rdfc.class.getClassLoader())) {
                 Class<?> clazz = loader.loadClass(this.clazz);
 
                 var mapper = new ObjectMapper();

@@ -102,6 +102,7 @@ javadocJarFor(sourceSets.types, "types", "types")
 publishing {
     publications {
         runner(MavenPublication) {
+
             artifact(tasks.named('runnerJar')){ builtBy tasks.named('runnerJar') }
             // artifact tasks.runnerJavadocJar
             groupId = project.group
@@ -124,6 +125,12 @@ publishing {
             version = project.version
         }
     }
+}
+
+publishToMavenLocal {
+    dependsOn runnerJar, typesJar
+    dependsOn runnerFatJar
+    dependsOn runnerSourcesJar, typesSourcesJar // , runnerJavadocJar
 }
 
 build {

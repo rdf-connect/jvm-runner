@@ -10,7 +10,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 
-import io.github.rdfc.Rdfc;
 import io.github.rdfc.json.ChannelHandlerModule;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;

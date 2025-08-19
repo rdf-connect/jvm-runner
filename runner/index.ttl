@@ -9,7 +9,7 @@ rdfc:javaImplementationOf rdfs:subPropertyOf sds:implementationOf.
 #
 rdfc:JvmRunner a rdfc:Runner;
   rdfc:handlesSubjectsOf rdfc:javaImplementationOf;
-  rdfc:command "java -jar /home/silvius/Projects/jvm-runner/output/app-1.0-fat.jar";
+  rdfc:command "[ -f jvm-runner.jar ] || curl -L -o jvm-runner.jar https://javadoc.jitpack.io/com/github/rdf-connect/jvm-runner/runner/master-SNAPSHOT/runner-master-SNAPSHOT-all.jar; java -jar jvm-runner.jar";
   rdfc:processor_definition <JavaProcessorShape>.
 
 [ ] a sh:NodeShape;

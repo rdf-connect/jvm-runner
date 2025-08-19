@@ -54,7 +54,6 @@ dependencies {
     implementation 'com.google.guava:guava:33.4.5-jre'
 }
 
-
 publishing {
     publications {
         maven(MavenPublication) {
@@ -70,10 +69,14 @@ publishing {
             artifact(tasks.javadocJar)
 
             // publish a plain file
-            artifact("../index.ttl") {
+            artifact(file("index.ttl")) {
                 classifier = "index"
                 extension  = "ttl"
             }
+            // artifact(tasks.indexArtifact) {
+            //     classifier = "index"   // optional
+            //     extension = "ttl"
+            // }
         }
     }
 }

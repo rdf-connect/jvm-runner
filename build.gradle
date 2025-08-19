@@ -9,7 +9,7 @@ version = "0.0.3"
 
 repositories {
     mavenCentral()
-	maven { url 'https://jitpack.io' }
+	maven { url = 'https://jitpack.io' }
 }
 
 sourceSets {
@@ -86,11 +86,9 @@ tasks.register("typesJar", Jar) {
     from sourceSets.types.output
 }
 tasks.register("descriptorArtifact", Jar) {
-    archiveBaseName.set("index")
-    archiveExtension.set("ttl") // optional: makes the output index.ttl instead of index.jar
-    from("index.ttl") {
-        into("") // put the file at the root of the archive
-    }
+    archiveBaseName = "index"
+    archiveExtension = "ttl" // optional: makes the output index.ttl instead of index.jar
+    from("index.ttl")
 }
 
 // --- Sources/javadoc tasks ---
@@ -104,18 +102,14 @@ javadocJarFor(sourceSets.types, "types", "types")
 publishing {
     publications {
         runner(MavenPublication) {
-            artifact(tasks.runnerJar) {
-                builtBy(tasks.runnerJar)
-            }
+            artifact(tasks.named('runnerJar')){ builtBy tasks.named('runnerJar') }
             // artifact tasks.runnerJavadocJar
             groupId = project.group
             artifactId = "jvm-runner"
             version = project.version
         }
         types(MavenPublication) {
-            artifact(tasks.typesJar) {
-                builtBy(tasks.typesJar)
-            }
+            artifact(tasks.named('typesJar')){ builtBy tasks.named('typesJar') }
             // artifact tasks.typesJavadocJar
             groupId = project.group
             artifactId = "types"

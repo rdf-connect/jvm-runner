@@ -2,6 +2,35 @@ plugins {
     // Apply the java-library plugin for API and implementation separation.
     id 'java'
     id 'maven-publish'   // ← this is required for `publishing { ... }`
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+tasks.register("descriptorArtifact", Copy) {
+    from("../index.ttl")
+    into(layout.buildDirectory.dir("artifacts"))
+    rename { "index.ttl" }
+}
+
+// normal jar
+tasks.jar {
+    manifest {
+        attributes(
+            'Main-Class': 'io.github.rdfc.Rdfc'
+        )
+    }
+}
+
+// fat jar
+tasks.named('shadowJar') {
+    manifest {
+        attributes(
+            'Main-Class': 'io.github.rdfc.Rdfc'
+        )
+    }
+}
+
+shadowJar {
+    mergeServiceFiles()
 }
 
 dependencies {
@@ -22,4 +51,33 @@ dependencies {
     implementation 'org.slf4j:slf4j-simple:2.0.12'
 
     implementation 'com.google.guava:guava:33.4.5-jre'
+}
+
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            // normal jar
+            artifact(tasks.jar)
+
+            // fat jar
+            artifact(tasks.shadowJar)
+
+            artifact(tasks.sourcesJar)
+
+            // javadoc jar (optional)
+            artifact(tasks.javadocJar)
+
+            // publish a plain file
+            artifact("../index.ttl") {
+                classifier = "index"
+                extension  = "ttl"
+            }
+        }
+    }
+}
+
+build {
+    dependsOn shadowJar
+    dependsOn descriptorArtifact
 }

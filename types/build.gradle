@@ -7,3 +7,15 @@ plugins {
 dependencies {
     implementation 'com.google.protobuf:protobuf-java:4.28.2'
 }
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            groupId = project.group
+            artifactId = project.name
+            version = project.version
+            from components.java
+        }
+    }
+}
+

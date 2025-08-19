@@ -150,3 +150,9 @@ build {
 configurations.all {
     resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
 }
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(11)
+    }
+}

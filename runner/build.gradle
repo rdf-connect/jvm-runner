@@ -31,7 +31,13 @@ tasks.named('shadowJar') {
 
 shadowJar {
     mergeServiceFiles()
+}
 
+// register a "fake jar" if Maven requires a Jar type
+tasks.register("indexJar", Jar) {
+    archiveBaseName.set("index")
+    archiveClassifier.set("index") // no classifier, or use "index"
+    from("index.ttl")
 }
 
 dependencies {
@@ -62,21 +68,11 @@ publishing {
 
             // fat jar
             artifact(tasks.shadowJar)
-
             artifact(tasks.sourcesJar)
-
-            // javadoc jar (optional)
             artifact(tasks.javadocJar)
 
-            // publish a plain file
-            artifact(file("index.ttl")) {
-                classifier = "index"
-                extension  = "ttl"
-            }
-            // artifact(tasks.indexArtifact) {
-            //     classifier = "index"   // optional
-            //     extension = "ttl"
-            // }
+            // plain file
+            artifact(tasks.indexJar) 
         }
     }
 }

@@ -1,72 +1,39 @@
-plugins {
-    id 'java'
-    id 'maven-publish'
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
+
+allprojects {
+    group = "io.github.rdf-connect"
+    version = "0.0.3"
 }
 
-group = "io.github.rdf-connect"
-version = "0.0.3"
-
-repositories {
-    mavenCentral()
-	maven { url = 'https://jitpack.io' }
-}
-
-sourceSets {
-    runner {
-        java.srcDir 'src/runner/java'
-    }
-    types {
-        java.srcDir 'src/types/java'
-    }
-}
-
-// --- Dependencies (generated proto needs protobuf runtime) ---
-dependencies {
-    runnerImplementation sourceSets.types.output
-	runnerImplementation 'com.github.rdf-connect:proto:9700abd'
-
-    runnerImplementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
-    runnerImplementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
-
-    runnerImplementation 'javax.annotation:javax.annotation-api:1.3.2'
-    runnerImplementation 'io.grpc:grpc-netty:1.63.0' // or latest version
-    runnerImplementation 'io.grpc:grpc-protobuf:1.63.0'
-    runnerImplementation 'io.grpc:grpc-stub:1.63.0'
-    runnerImplementation 'io.grpc:grpc-core:1.63.0'
-
-    runnerImplementation 'com.google.protobuf:protobuf-java:4.28.2'
-    
-    typesImplementation 'com.google.protobuf:protobuf-java:4.28.2'
-
-    // For logging, optional
-    implementation 'org.slf4j:slf4j-simple:2.0.12'
-
-}
-
-// --- Utility tasks for sources/javadoc jars ---
-def sourcesJarFor = { SourceSet set, String taskName, String name ->
-    tasks.register("${taskName}SourcesJar", Jar) {
-        archiveBaseName = name
-        archiveClassifier = "sources"
-        from set.allSource
-        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    }
-}
-
-def javadocJarFor = { SourceSet set, String taskName, String name ->
-    def javadocTask = tasks.register("${taskName}Javadoc", Javadoc) {
-        source = set.allJava
-        classpath = set.compileClasspath
+subprojects {
+	apply plugin: 'java'
+	apply plugin: 'maven-publish'
+	
+    repositories {
+        mavenCentral()
+        maven { url = 'https://jitpack.io' }
     }
 
-    tasks.register("${taskName}JavadocJar", Jar) {
-        archiveBaseName = name
-        archiveClassifier = "javadoc"
-        from javadocTask.map { it.destinationDir }
-        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    }
+	java {
+		withSourcesJar()
+		withJavadocJar()
+
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(11)
+        }
+	}
+
+	publishing {
+		publications {
+			maven(MavenPublication) {
+				groupId = project.group
+				artifactId = project.name
+				version = project.version
+				from components.java
+			}
+		}
+	}
 }
+
 
 // // Fat jar tasks per source set
 // tasks.register('runnerFatJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
@@ -75,16 +42,7 @@ def javadocJarFor = { SourceSet set, String taskName, String name ->
 //     configurations = [project.configurations.runnerRuntimeClasspath]
 // }
 //
-// --- Jar tasks ---
-tasks.register("runnerJar", Jar) {
-    archiveBaseName = "jvm-runner"
-    from sourceSets.runner.output
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-}
-tasks.register("typesJar", Jar) {
-    archiveBaseName = "types"
-    from sourceSets.types.output
-}
+
 // tasks.register("descriptorArtifact", Jar) {
 //     archiveBaseName = "index"
 //     archiveExtension = "ttl" // optional: makes the output index.ttl instead of index.jar
@@ -133,51 +91,6 @@ tasks.register("typesJar", Jar) {
 //     dependsOn runnerSourcesJar, typesSourcesJar // , runnerJavadocJar
 // }
 
-
-// publishing {
-//     publications {
-//         mavenJava(MavenPublication) {
-//             from components.java
-//
-//             // publish descriptor
-//             artifact(file('index.ttl')) {
-//                 classifier = 'index'
-//                 extension = 'ttl'
-//                 version = ""
-//             }
-//         }
-//     }
-// }
-
-publishing {
-    publications {
-        runner(MavenPublication) {
-            artifact(tasks.named('runnerJar')){ builtBy tasks.named('runnerJar') }
-            groupId = project.group
-            artifactId = 'jvm-runner'
-            version = project.version
-        }
-        types(MavenPublication) {
-            artifact(tasks.named('typesJar')){ builtBy tasks.named('typesJar') }
-            groupId = project.group
-            artifactId = 'types'
-            version = project.version
-        }
-    }
-}
-
-// build {
-//     dependsOn runnerJar, typesJar
-//     dependsOn runnerFatJar
-//     dependsOn runnerSourcesJar, typesSourcesJar // , runnerJavadocJar
-// }
-
 configurations.all {
     resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
-}
-
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(11)
-    }
 }

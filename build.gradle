@@ -86,8 +86,11 @@ tasks.register("typesJar", Jar) {
     from sourceSets.types.output
 }
 tasks.register("descriptorArtifact", Jar) {
-    archiveBaseName = "index"
-    from("index.ttl") { into "" }
+    archiveBaseName.set("index")
+    archiveExtension.set("ttl") // optional: makes the output index.ttl instead of index.jar
+    from("index.ttl") {
+        into("") // put the file at the root of the archive
+    }
 }
 
 // --- Sources/javadoc tasks ---
@@ -101,23 +104,27 @@ javadocJarFor(sourceSets.types, "types", "types")
 publishing {
     publications {
         runner(MavenPublication) {
-            artifact tasks.runnerJar
-            artifact tasks.runnerSourcesJar
+            artifact(tasks.runnerJar) {
+                builtBy(tasks.runnerJar)
+            }
             // artifact tasks.runnerJavadocJar
             groupId = project.group
             artifactId = "jvm-runner"
             version = project.version
         }
         types(MavenPublication) {
-            artifact tasks.typesJar
-            artifact tasks.typesSourcesJar
+            artifact(tasks.typesJar) {
+                builtBy(tasks.typesJar)
+            }
             // artifact tasks.typesJavadocJar
             groupId = project.group
             artifactId = "types"
             version = project.version
         }
         descriptor(MavenPublication) {
-            artifact tasks.descriptorArtifact
+            artifact(tasks.named("descriptorArtifact")) {
+                builtBy(tasks.named("descriptorArtifact"))
+            }
             groupId = project.group
             artifactId = "descriptor"
             version = project.version

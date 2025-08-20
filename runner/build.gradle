@@ -42,7 +42,7 @@ tasks.register("indexJar", Jar) {
 
 dependencies {
     implementation project(path: ":types")
-	implementation 'com.github.rdf-connect:proto:9700abd'
+	implementation 'com.github.rdf-connect:proto:master-SNAPSHOT'
 
     implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
@@ -80,4 +80,8 @@ publishing {
 build {
     dependsOn shadowJar
     dependsOn descriptorArtifact
+}
+
+configurations.all {
+    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
 }

@@ -1,9 +1,13 @@
 package io.github.rdfc;
 
+import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -288,7 +292,18 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
         Processor<?> loadClass(Runner runner, String arguments, Logger logger) throws Exception {
             URL jarUrl = new URI(this.jar).toURL();
-            URLClassLoader loader = new URLClassLoader(new URL[] { jarUrl }, Rdfc.class.getClassLoader());
+            // Download JAR to temp dir
+
+            logger.info("Start download");
+            Path jarPath = Files.createTempFile("remote-lib", ".jar");
+            try (InputStream in = jarUrl.openStream()) {
+                Files.copy(in, jarPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            logger.info("End download");
+            // Use local URLClassLoader
+            URLClassLoader loader = new URLClassLoader(new URL[] { jarPath.toUri().toURL() });
+
             Class<?> clazz = loader.loadClass(this.clazz);
 
             var mapper = new ObjectMapper();

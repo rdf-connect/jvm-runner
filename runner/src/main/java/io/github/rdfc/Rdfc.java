@@ -19,12 +19,12 @@ public class Rdfc {
         for (var arg : args) {
             System.out.println("Argument: " + arg);
         }
-        ManagedChannel channel = ManagedChannelBuilder.forTarget("dns:///127.0.0.1:50051")
+        ManagedChannel channel = ManagedChannelBuilder.forTarget(args[0])
                 .usePlaintext()
                 .build();
         RunnerGrpc.RunnerStub stub = RunnerGrpc.newStub(channel);
 
-        new Runner(stub, args[1]);
+        new Runner(stub, args[1], () -> channel.shutdown());
 
         channel.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
     }

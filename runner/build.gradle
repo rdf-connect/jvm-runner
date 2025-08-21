@@ -53,9 +53,6 @@ dependencies {
     implementation 'io.grpc:grpc-stub:1.63.0'
     implementation 'io.grpc:grpc-core:1.63.0'
     implementation 'com.google.protobuf:protobuf-java:4.28.2'
-    
-    // For logging, optional
-    implementation 'org.slf4j:slf4j-simple:2.0.12'
 
     implementation 'com.google.guava:guava:33.4.5-jre'
 }

@@ -1,16 +1,19 @@
 package io.github.rdfc;
 
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 
 /**
  * Processor
  * A processor is finished when the transform and produce callbacks are called
  */
 public abstract class Processor<T> {
-    protected T arguments;
+    protected final T arguments;
+    protected final Logger logger;
 
-    public Processor(T arguments) {
+    public Processor(T arguments, Logger logger) {
         this.arguments = arguments;
+        this.logger = logger;
     }
 
     // This is called and awaits the callback before transform

@@ -44,7 +44,6 @@ public class Reader implements IReader {
     // Each listener expecting a stream, receives a stream with a single chunk
     // Each listener expecting a single message, gets that message
     void msg(ByteString buffer) {
-        System.out.println("Got msg, sending to " + this.strings.size() + " listeners");
         this.strings.forEach(string -> string.push(buffer));
         this.streams.forEach(stream -> stream.push(
                 new Reader.SingleIter<>(buffer)));

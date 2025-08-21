@@ -1,6 +1,9 @@
 package io.github.rdfc;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.logging.Handler;
+import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
@@ -14,6 +17,20 @@ import rdfc.Log.LogMessage;
 
 public class GrpcLogHandler extends Handler
         implements StreamObserver<Empty> {
+    public static final Map<Level, String> LEVEL_TO_STRING;
+
+    static {
+        Map<Level, String> map = new HashMap<>();
+        map.put(Level.SEVERE, "error");
+        map.put(Level.WARNING, "warn");
+        map.put(Level.INFO, "info");
+        map.put(Level.CONFIG, "debug");
+        map.put(Level.FINE, "debug");
+        map.put(Level.FINER, "debug");
+        map.put(Level.FINEST, "trace");
+        LEVEL_TO_STRING = Map.copyOf(map); // immutable map
+    }
+
     private final StreamObserver<LogMessage> stream;
     private final String[] entity;
     private final String uri;
@@ -31,7 +48,7 @@ public class GrpcLogHandler extends Handler
         }
 
         var msg = LogMessage.newBuilder()
-                .setLevel(record.getLevel().getName().toLowerCase())
+                .setLevel(LEVEL_TO_STRING.get(record.getLevel()))
                 .setMsg(record.getMessage());
 
         msg.addEntities(uri);

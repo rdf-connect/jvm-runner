@@ -54,6 +54,13 @@ public class Runner implements StreamObserver<RunnerMessage> {
     protected final String uri;
 
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete) {
+
+        var logger = Logger.getLogger("");
+        logger.setLevel(Level.ALL);
+        for (Handler h : logger.getHandlers()) {
+            logger.removeHandler(h);
+        }
+
         this.uri = uri;
         this.stream = stub.connect(this);
         this.logger = GrpcLogHandler.createLogger(stub, uri, "cli");
@@ -83,28 +90,25 @@ public class Runner implements StreamObserver<RunnerMessage> {
     @Override
     public void onNext(RunnerMessage value) {
 
-        System.out.println("Got message " + value.getAllFields().keySet().toString());
+        this.logger.fine("Got message " + value.getAllFields().keySet().toString());
 
         if (value.hasPipeline()) {
-            System.out.println("Pipeline message");
             return;
         }
 
         if (value.hasMsg()) {
-            System.out.println("Msg message");
             var msg = value.getMsg();
             var data = msg.getData();
             var reader = this.channels.get(msg.getChannel());
             if (reader != null) {
                 reader.msg(data);
             } else {
-                System.out.println("Channel " + msg.getChannel() + " not present.");
+                this.logger.finest("Channel " + msg.getChannel() + " not present.");
             }
             return;
         }
 
         if (value.hasStreamMsg()) {
-            System.out.println("Stream Msg message");
             var msg = value.getStreamMsg();
             var id = msg.getId();
 
@@ -112,42 +116,38 @@ public class Runner implements StreamObserver<RunnerMessage> {
             if (channel != null) {
                 this.stub.receiveStreamMessage(id, channel.stream());
             } else {
-                System.out.println("Channel " + msg.getChannel() + " not present.");
+                this.logger.finest("Channel " + msg.getChannel() + " not present.");
             }
 
             return;
         }
 
         if (value.hasClose()) {
-            System.out.println("Close message");
             var msg = value.getClose();
 
             var channel = this.channels.get(msg.getChannel());
             if (channel != null) {
                 channel.close();
             } else {
-                System.out.println("Channel " + msg.getChannel() + " not present.");
+                this.logger.finest("Channel " + msg.getChannel() + " not present.");
             }
 
             return;
         }
 
         if (value.hasStart()) {
-            System.out.println("Start message");
 
             this.processors.forEach((k, v) -> {
                 v.produce(st -> {
-                    System.out.println("Processor Produced " + k);
+                    this.logger.fine("Processor " + k + " finished producing.");
                     this.decreaseAndCheckEnd();
                 });
             });
 
-            System.out.println("Start happened");
             return;
         }
 
         if (value.hasProc()) {
-            System.out.println("Proc start message");
             var proc = value.getProc();
             var uri = proc.getUri();
 
@@ -158,14 +158,13 @@ public class Runner implements StreamObserver<RunnerMessage> {
                 processor.init(_void -> {
                     this.awaiting.updateAndGet(x -> x + 2);
                     processor.transform(st -> {
-                        System.out.println("Processor transformed " + uri);
+                        this.logger.fine("Processor " + uri + " finished transforming.");
                         this.decreaseAndCheckEnd();
                     });
                     latch.countDown();
                 });
                 latch.await();
 
-                System.out.println("Sending proc init " + uri);
                 this.sendProcInit(uri, Optional.empty());
             } catch (Exception e) {
                 e.printStackTrace();
@@ -175,13 +174,13 @@ public class Runner implements StreamObserver<RunnerMessage> {
             return;
         }
         System.err.println("Unsupported message " + value.getUnknownFields());
+        this.logger.severe("Unsupported message " + value.getUnknownFields());
     }
 
     private Processor<?> startProc(rdfc.Runner.Processor proc, Logger logger) throws Exception {
         var uri = proc.getUri();
         var config = proc.getConfig();
         var params = proc.getArguments();
-        System.out.println("Trying to start proc " + uri + " " + config + " " + params);
 
         var arg = mapper.readValue(config, Config.class);
         var processor = arg.loadClass(this, params, logger);
@@ -193,14 +192,13 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
     @Override
     public void onError(Throwable t) {
-        // TODO Auto-generated method stub
         throw new UnsupportedOperationException("Unimplemented method 'onError'");
     }
 
     @Override
     public void onCompleted() {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'onCompleted'");
+        System.err.println("onCompleted maybe I should do something");
+        this.logger.severe("onCompleted maybe I should do something");
     }
 
     void sendIdentify(String uri) {
@@ -312,8 +310,6 @@ public class Runner implements StreamObserver<RunnerMessage> {
             }
 
             Class<?> paramType = constructor.getParameterTypes()[0];
-
-            System.out.println("Found type " + paramType.getTypeName());
 
             // Use Jackson to deserialize JSON into the param type
             Object arg = mapper.readValue(arguments, paramType);

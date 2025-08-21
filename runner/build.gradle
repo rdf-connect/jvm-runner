@@ -79,6 +79,3 @@ build {
     dependsOn descriptorArtifact
 }
 
-configurations.all {
-    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
-}

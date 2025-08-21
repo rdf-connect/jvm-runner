@@ -1,6 +1,5 @@
 plugins {
-    // Apply the java-library plugin for API and implementation separation.
-    id 'maven-publish'   // ← this is required for `publishing { ... }`
+    id 'maven-publish'
 }
 
 allprojects {
@@ -27,63 +26,3 @@ subprojects {
 	}
 }
 
-
-// // Fat jar tasks per source set
-// tasks.register('runnerFatJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
-//     archiveClassifier.set('all')
-//     from sourceSets.runner.output
-//     configurations = [project.configurations.runnerRuntimeClasspath]
-// }
-//
-
-// tasks.register("descriptorArtifact", Jar) {
-//     archiveBaseName = "index"
-//     archiveExtension = "ttl" // optional: makes the output index.ttl instead of index.jar
-//     from("index.ttl")
-// }
-
-// // --- Sources/javadoc tasks ---
-// sourcesJarFor(sourceSets.runner, "runner", "jvm-runner")
-// sourcesJarFor(sourceSets.types, "types", "types")
-//
-// javadocJarFor(sourceSets.runner, "runner", "jvm-runner")
-// javadocJarFor(sourceSets.types, "types", "types")
-
-// --- Publishing ---
-// publishing {
-//     publications {
-//         runner(MavenPublication) {
-//
-//             artifact(tasks.named('runnerJar')){ builtBy tasks.named('runnerJar') }
-//             // artifact tasks.runnerJavadocJar
-//             groupId = project.group
-//             artifactId = "jvm-runner"
-//             version = project.version
-//         }
-//         types(MavenPublication) {
-//             artifact(tasks.named('typesJar')){ builtBy tasks.named('typesJar') }
-//             // artifact tasks.typesJavadocJar
-//             groupId = project.group
-//             artifactId = "types"
-//             version = project.version
-//         }
-//         descriptor(MavenPublication) {
-//             artifact(tasks.named("descriptorArtifact")) {
-//                 builtBy(tasks.named("descriptorArtifact"))
-//             }
-//             groupId = project.group
-//             artifactId = "descriptor"
-//             version = project.version
-//         }
-//     }
-// }
-//
-// publishToMavenLocal {
-//     dependsOn runnerJar, typesJar
-//     dependsOn runnerFatJar
-//     dependsOn runnerSourcesJar, typesSourcesJar // , runnerJavadocJar
-// }
-
-configurations.all {
-    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
-}

@@ -40,11 +40,10 @@ To use your JVM processor in a pipeline:
 Processors must:
 
 1. **Extend the abstract class** `io.github.rdfc.Processor<T>` where `T` is an `Args` class containing configuration fields.
-2. **Implement lifecycle methods**:
+2. **Implement lifecycle methods**: The callbacks should be called to indicate that the function is finished.
    - `init(Consumer<Void> callback)` — initialization.
    - `transform(Consumer<Void> callback)` — processing of inputs from readers, called for each processor before produce.
    - `produce(Consumer<Void> callback)` — producing data, useful for processor like a file reader.
-   The callbacks should be called to indicate that the function is finished.
 3. **Define an `Args` class** with fields matching RDF properties defined in the SHACL shape.
 
 ### Processor description file

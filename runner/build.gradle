@@ -44,8 +44,8 @@ dependencies {
     implementation project(path: ":types")
 	implementation 'com.github.rdf-connect:proto:master-SNAPSHOT'
 
-    implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.20.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.0'
 
     implementation 'javax.annotation:javax.annotation-api:1.3.2'
     implementation 'io.grpc:grpc-netty:1.63.0' // or latest version

@@ -1,7 +1,7 @@
-# JVM Runner Plugin for RDF Connect
+# JVM Runner for RDF Connect
 
 The **JvmRunner** executes processors implemented in the Java Virtual Machine (JVM).  
-It allows you to integrate custom Java (or Kotlin, Scala, etc.) processors into an RDF Connect streaming pipeline by providing a JAR and a class name.
+It allows you to integrate custom Java (or Kotlin, Scala, etc.) processors into an RDF-Connect streaming pipeline by providing a JAR and a class name.
 
 ## Overview
 
@@ -34,6 +34,8 @@ To use your JVM processor in a pipeline:
 <myProcessor> a rdfc:TestProcessor.
 ```
 
+Make sure you also import the processor. Check the documentation of your processor on how to install it.
+
 
 ## Implementing a new processor
 
@@ -48,7 +50,7 @@ Processors must:
 
 ### Processor description file
 
-The processor should be accompanied with a description file, often called `index.ttl`.
+The processor should be accompanied by a description file, often called `index.ttl`.
 
 They require the following fields:
 * `rdfc:javaImplementationOf` with value `rdfc:Processor`, indicating that this processor is a JavaProcessor,
@@ -57,7 +59,7 @@ They require the following fields:
 * A SHACL shape defining the required arguments.
 
 For example, the following description file declares a processor with arguments `{ reader: Reader, writer: Writer, additionalText: string }`.
-A matching implementation can be found on [github](https://github.com/rdf-connect/template-processor-jvm/blob/main/src/main/java/org/example/Library.java).
+A matching implementation can be found on [GitHub](https://github.com/rdf-connect/template-processor-jvm/blob/main/src/main/java/org/example/Library.java).
 ```turtle
 @prefix rdfc: <https://w3id.org/rdf-connect#>.
 @prefix sh: <http://www.w3.org/ns/shacl#>.

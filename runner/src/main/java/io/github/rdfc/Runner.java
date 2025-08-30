@@ -292,15 +292,22 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
         Processor<?> loadClass(Runner runner, String arguments, Logger logger) throws Exception {
             URL jarUrl = new URI(this.jar).toURL();
-            // Download JAR to temp dir
 
-            logger.info("Start download");
-            Path jarPath = Files.createTempFile("remote-lib", ".jar");
-            try (InputStream in = jarUrl.openStream()) {
-                Files.copy(in, jarPath, StandardCopyOption.REPLACE_EXISTING);
+            Path jarPath;
+            if (jarUrl.getProtocol().equalsIgnoreCase("http") || jarUrl.getProtocol().equalsIgnoreCase("https")) {
+                // Remote JAR, download it
+                logger.info("Downloading JAR from " + this.jar);
+                // Download JAR to temp dir
+                jarPath = Files.createTempFile("remote-lib", ".jar");
+                try (InputStream in = jarUrl.openStream()) {
+                    Files.copy(in, jarPath, StandardCopyOption.REPLACE_EXISTING);
+                }
+                logger.info("End download");
+            } else {
+                // Local JAR, use it directly
+                jarPath = Path.of(jarUrl.toURI());
             }
 
-            logger.info("End download");
             // Use local URLClassLoader
             URLClassLoader loader = new URLClassLoader(new URL[] { jarPath.toUri().toURL() });
 

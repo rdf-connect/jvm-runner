@@ -2,8 +2,10 @@ package io.github.rdfc;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.google.protobuf.ByteString;
 
@@ -23,7 +25,6 @@ public class Reader implements IReader {
     @Override
     public String id() {
         return this.id;
-
     }
 
     @Override
@@ -43,10 +44,18 @@ public class Reader implements IReader {
     // The runner receives a single byestring message.
     // Each listener expecting a stream, receives a stream with a single chunk
     // Each listener expecting a single message, gets that message
-    void msg(ByteString buffer) {
-        this.strings.forEach(string -> string.push(buffer));
-        this.streams.forEach(stream -> stream.push(
-                new Reader.SingleIter<>(buffer)));
+    CompletableFuture<Void> msg(ByteString buffer) {
+        var stringFutures = this.strings.stream()
+                .map(string -> string.push(buffer));
+
+        var streamFutures = this.streams.stream()
+                .map(string -> string.push(new Reader.SingleIter<>(buffer)));
+
+        var futures = java.util.stream.Stream.concat(stringFutures, streamFutures)
+                .collect(Collectors.toList());
+
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+
     }
 
     // The Runner receives a stream message event, and creates create a stream
@@ -54,19 +63,42 @@ public class Reader implements IReader {
     // For each listener, create a new stream and push it to that listener.
     // Return a generator that for each incoming message for that stream, pushes it
     // to all just created streams.
-    Generator stream() {
-        var listeningStreams = new ArrayList<StreamIter<ByteString>>(this.streams.size());
-        this.streams.forEach(stream -> {
-            var iter = new StreamIter<ByteString>();
-            stream.push(iter);
-            listeningStreams.add(iter);
-        });
+    public Stream<ByteString> stream(Consumer<Void> betweenChunks) {
+        return new Stream<ByteString>() {
+            ByteString completeString = ByteString.empty();
 
-        // When all data is received from this stream message, send that full string to
-        // all simple string listeners
-        return new Generator.StreamsGenerator(listeningStreams, st -> {
-            this.strings.forEach(stream -> stream.push(st));
-        });
+            List<StreamIter<ByteString>> streams = Reader.this.streams.stream().map(st -> {
+                var consumingStream = new StreamIter<ByteString>();
+                st.push(consumingStream);
+                return consumingStream;
+            }).collect(Collectors.toList());
+
+            @Override
+            public CompletableFuture<Void> chunk(ByteString chunk) {
+                if (!strings.isEmpty()) {
+                    this.completeString = this.completeString.concat(chunk);
+                }
+
+                List<CompletableFuture<Void>> streamFutures = this.streams.stream()
+                        .map(st -> st.push(chunk))
+                        .collect(Collectors.toList());
+
+                return CompletableFuture.allOf(streamFutures.toArray(new CompletableFuture[0]))
+                        .thenAccept(betweenChunks);
+            }
+
+            @Override
+            public CompletableFuture<Void> close() {
+                for (var st : this.streams) {
+                    st.end();
+                }
+
+                var stringFutures = Reader.this.strings.stream()
+                        .map(string -> string.push(this.completeString)).collect(Collectors.toList());
+
+                return CompletableFuture.allOf(stringFutures.toArray(new CompletableFuture[0]));
+            }
+        };
     }
 
     // The runner receives a close, all listeners should close
@@ -83,19 +115,21 @@ public class Reader implements IReader {
         }
 
         @Override
-        public void on(Consumer<Optional<T>> cb) {
-            cb.accept(Optional.of(this.item));
-            cb.accept(Optional.empty());
+        public CompletableFuture<Void> on(Function<T, CompletableFuture<?>> apply) {
+            return apply.apply(this.item).thenApply(x -> null);
         }
     }
 
     static class StreamIter<T> extends Iter<T> {
-        void push(T item) {
-            this.callbacks.forEach(cb -> cb.accept(Optional.of(item)));
+        CompletableFuture<Void> push(T item) {
+            List<CompletableFuture<?>> futures = this.callbacks.stream()
+                    .map(cb -> cb.apply(item).thenApply(x -> null)) // invoke each callback
+                    .collect(Collectors.toList());
+            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
         }
 
         void end() {
-            this.callbacks.forEach(cb -> cb.accept(Optional.empty()));
+            this.endFuture.complete(null);
         }
     }
 }

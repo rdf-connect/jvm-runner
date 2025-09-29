@@ -1,19 +1,16 @@
 package io.github.rdfc;
 
+import java.util.concurrent.CompletableFuture;
+
 import com.google.protobuf.ByteString;
 
-public interface IWriter {
-    String id();
+public abstract class IWriter extends Stream<ByteString> {
+    public abstract String id();
 
-    void msg(ByteString buffer);
-
-    Stream stream();
-
-    void close();
-
-    public static interface Stream {
-        void push(ByteString chunk);
-
-        void close();
-    }
+    /**
+     * Send a stream of data over the channel.
+     * 
+     * @return a stream of ByteStrings
+     */
+    public abstract CompletableFuture<Stream<ByteString>> stream();
 }

@@ -11,7 +11,7 @@ import com.google.protobuf.Empty;
 
 import io.grpc.stub.StreamObserver;
 import rdfc.RunnerGrpc;
-import rdfc.Log.LogMessage;
+import rdfc.Service.LogMessage;
 
 // Assuming you have a generated gRPC stub: LogServiceGrpc.LogServiceBlockingStub
 

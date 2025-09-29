@@ -8,15 +8,14 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.*;
-import java.util.function.Consumer;
 
 import java.util.logging.*;
+
+import io.github.rdfc.helpers.StreamReaderHelper;
 import io.github.rdfc.json.ChannelHandlerModule;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -25,17 +24,12 @@ import com.fasterxml.jackson.databind.type.TypeFactory;
 import com.google.protobuf.ByteString;
 
 import io.grpc.stub.StreamObserver;
-import rdfc.Common;
 import rdfc.Common.Close;
-import rdfc.Common.DataChunk;
-import rdfc.Common.Id;
 import rdfc.Common.Message;
-import rdfc.Common.StreamMessage;
 import rdfc.Orchestrator.OrchestratorMessage;
 import rdfc.Orchestrator.ProcessorInit;
 import rdfc.Runner.RunnerMessage;
 import rdfc.RunnerGrpc;
-import rdfc.RunnerGrpc.RunnerStub;
 
 /**
  * Runner
@@ -46,7 +40,8 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
     protected RunnerGrpc.RunnerStub stub;
 
-    protected HashMap<String, Reader> channels = new HashMap<>();
+    protected HashMap<String, Reader> readers = new HashMap<>();
+    protected HashMap<String, Writer> writers = new HashMap<>();
     protected HashMap<String, Processor<?>> processors = new HashMap<>();
 
     protected final ObjectMapper mapper;
@@ -80,7 +75,11 @@ public class Runner implements StreamObserver<RunnerMessage> {
     }
 
     public void setReader(String uri, Reader reader) {
-        this.channels.put(uri, reader);
+        this.readers.put(uri, reader);
+    }
+
+    public void setWriter(String uri, Writer writer) {
+        this.writers.put(uri, writer);
     }
 
     private void decreaseAndCheckEnd() {
@@ -103,7 +102,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
         if (value.hasMsg()) {
             var msg = value.getMsg();
             var data = msg.getData();
-            var reader = this.channels.get(msg.getChannel());
+            var reader = this.readers.get(msg.getChannel());
             if (reader != null) {
                 reader.msg(data);
             } else {
@@ -112,13 +111,27 @@ public class Runner implements StreamObserver<RunnerMessage> {
             return;
         }
 
+        if (value.hasProcessed()) {
+            var processed = value.getProcessed();
+            var channel = processed.getChannel();
+            var tick = processed.getTick();
+            var writer = this.writers.get(channel);
+            if (writer != null) {
+                writer.processed(tick);
+
+            } else {
+                this.logger.finest("Channel " + channel + " not present.");
+            }
+        }
+
         if (value.hasStreamMsg()) {
             var msg = value.getStreamMsg();
             var id = msg.getId();
 
-            var channel = this.channels.get(msg.getChannel());
-            if (channel != null) {
-                this.stub.receiveStreamMessage(id, channel.stream());
+            var reader = this.readers.get(msg.getChannel());
+            if (reader != null) {
+                var helper = new StreamReaderHelper(reader, this.stub);
+                helper.identify(id);
             } else {
                 this.logger.finest("Channel " + msg.getChannel() + " not present.");
             }
@@ -129,7 +142,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
         if (value.hasClose()) {
             var msg = value.getClose();
 
-            var channel = this.channels.get(msg.getChannel());
+            var channel = this.readers.get(msg.getChannel());
             if (channel != null) {
                 channel.close();
             } else {
@@ -140,9 +153,8 @@ public class Runner implements StreamObserver<RunnerMessage> {
         }
 
         if (value.hasStart()) {
-
             this.processors.forEach((k, v) -> {
-                v.produce(st -> {
+                v.produce().thenAccept(st -> {
                     this.logger.fine("Processor " + k + " finished producing.");
                     this.decreaseAndCheckEnd();
                 });
@@ -159,9 +171,9 @@ public class Runner implements StreamObserver<RunnerMessage> {
             try {
                 var latch = new CountDownLatch(1);
                 Processor<?> processor = this.startProc(proc, procLogger);
-                processor.init(_void -> {
+                processor.init().thenAccept(_void -> {
                     this.awaiting.updateAndGet(x -> x + 2);
-                    processor.transform(st -> {
+                    processor.transform().thenAccept(st -> {
                         this.logger.fine("Processor " + uri + " finished transforming.");
                         this.decreaseAndCheckEnd();
                     });
@@ -231,59 +243,6 @@ public class Runner implements StreamObserver<RunnerMessage> {
         var builder = OrchestratorMessage.newBuilder();
         builder.setClose(Close.newBuilder().setChannel(channel));
         this.stream.onNext(builder.build());
-    }
-
-    Consumer<Optional<ByteString>> sendStreamMessage(String channel) {
-        return new StreamingMessage(this.stream, channel, this.stub);
-    }
-
-    private static class StreamingMessage implements StreamObserver<Common.Id>, Consumer<Optional<ByteString>> {
-        private boolean idSet = false;
-        private String channel;
-        private StreamObserver<OrchestratorMessage> stream;
-        private StreamObserver<DataChunk> dataStream;
-        private List<Optional<ByteString>> buffer = new ArrayList<>();
-
-        StreamingMessage(StreamObserver<OrchestratorMessage> stream, String channel, RunnerStub stub) {
-            this.stream = stream;
-            this.channel = channel;
-            this.dataStream = stub.sendStreamMessage(this);
-        }
-
-        @Override
-        public void accept(Optional<ByteString> t) {
-            if (idSet) {
-                t.ifPresentOrElse(
-                        chunk -> {
-                            this.dataStream.onNext(DataChunk.newBuilder().setData(chunk).build());
-                        }, () -> {
-                            this.dataStream.onCompleted();
-                        });
-            } else {
-                this.buffer.add(t);
-            }
-        }
-
-        @Override
-        public void onNext(Id value) {
-            // Send this id as a stream message
-            var builder = OrchestratorMessage.newBuilder();
-            builder.setStreamMsg(StreamMessage.newBuilder().setId(value).setChannel(this.channel));
-            this.stream.onNext(builder.build());
-
-            this.buffer.forEach(this::accept);
-            idSet = true;
-        }
-
-        @Override
-        public void onError(Throwable t) {
-            throw new UnsupportedOperationException("Unimplemented method 'onError'");
-        }
-
-        @Override
-        public void onCompleted() {
-            throw new UnsupportedOperationException("Unimplemented method 'onCompleted'");
-        }
     }
 
     private static class Config {

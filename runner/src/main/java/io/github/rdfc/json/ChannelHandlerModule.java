@@ -85,7 +85,9 @@ public class ChannelHandlerModule extends SimpleModule {
 
                     if ("https://w3id.org/rdf-connect#Writer".equals(type)) {
                         String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
-                        return new Writer(id, this.runner);
+                        var out = new Writer(id, this.runner);
+                        this.runner.setWriter(id, out);
+                        return out;
                     }
                 }
             }

@@ -1,6 +1,6 @@
 package io.github.rdfc;
 
-import java.util.function.Consumer;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 
 /**
@@ -17,11 +17,11 @@ public abstract class Processor<T> {
     }
 
     // This is called and awaits the callback before transform
-    public abstract void init(Consumer<Void> callback);
+    public abstract CompletableFuture<?> init();
 
     // Transofrm is called before produce, but does not await the callback
-    public abstract void transform(Consumer<Void> callback);
+    public abstract CompletableFuture<?> transform();
 
     // Produce is called when all processors are constucted
-    public abstract void produce(Consumer<Void> callback);
+    public abstract CompletableFuture<?> produce();
 }

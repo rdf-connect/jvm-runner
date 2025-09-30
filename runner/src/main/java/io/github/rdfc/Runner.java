@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.*;
 
 import java.util.logging.*;
 
+import io.github.rdfc.helpers.StreamObserverWrapper;
 import io.github.rdfc.helpers.StreamReaderHelper;
 import io.github.rdfc.json.ChannelHandlerModule;
 
@@ -25,18 +26,19 @@ import com.google.protobuf.ByteString;
 
 import io.grpc.stub.StreamObserver;
 import rdfc.Common.Close;
-import rdfc.Common.Message;
-import rdfc.Orchestrator.OrchestratorMessage;
-import rdfc.Orchestrator.ProcessorInit;
-import rdfc.Runner.RunnerMessage;
+import rdfc.Common.GlobalAck;
+import rdfc.Common.SendingMessage;
 import rdfc.RunnerGrpc;
+import rdfc.Service.FromRunner;
+import rdfc.Service.ProcessorInitialized;
+import rdfc.Service.ToRunner;
 
 /**
  * Runner
  */
-public class Runner implements StreamObserver<RunnerMessage> {
+public class Runner implements StreamObserver<ToRunner> {
 
-    public StreamObserver<OrchestratorMessage> stream;
+    public StreamObserver<FromRunner> stream;
 
     protected RunnerGrpc.RunnerStub stub;
 
@@ -61,13 +63,13 @@ public class Runner implements StreamObserver<RunnerMessage> {
         }
 
         this.uri = uri;
-        this.stream = stub.connect(this);
         this.logger = GrpcLogHandler.createLogger(stub, uri, "cli");
+        this.stream = new StreamObserverWrapper<>(stub.connect(this), "main stream", this.logger);
 
         this.onComplete = onComplete;
         this.stub = stub;
         this.mapper = new ObjectMapper();
-        this.mapper.registerModule(new ChannelHandlerModule(this));
+        this.mapper.registerModule(new ChannelHandlerModule(this, this.logger));
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
         this.logger.info("Hello from the runner!");
@@ -91,8 +93,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
     }
 
     @Override
-    public void onNext(RunnerMessage value) {
-
+    public void onNext(ToRunner value) {
         this.logger.fine("Got message " + value.getAllFields().keySet().toString());
 
         if (value.hasPipeline()) {
@@ -102,11 +103,15 @@ public class Runner implements StreamObserver<RunnerMessage> {
         if (value.hasMsg()) {
             var msg = value.getMsg();
             var data = msg.getData();
+            var globalSequenceNumber = msg.getGlobalSequenceNumber();
+            var channel = msg.getChannel();
             var reader = this.readers.get(msg.getChannel());
             if (reader != null) {
-                reader.msg(data);
+                reader.msg(data).thenAccept(_void -> {
+                    sendProcessed(channel, globalSequenceNumber);
+                });
             } else {
-                this.logger.finest("Channel " + msg.getChannel() + " not present.");
+                this.logger.warning("Channel " + msg.getChannel() + " not present.");
             }
             return;
         }
@@ -114,26 +119,31 @@ public class Runner implements StreamObserver<RunnerMessage> {
         if (value.hasProcessed()) {
             var processed = value.getProcessed();
             var channel = processed.getChannel();
-            var tick = processed.getTick();
+            var localSequenceNumber = processed.getLocalSequenceNumber();
             var writer = this.writers.get(channel);
             if (writer != null) {
-                writer.processed(tick);
+                writer.processed(localSequenceNumber);
 
             } else {
-                this.logger.finest("Channel " + channel + " not present.");
+                this.logger.warning("Channel " + channel + " not present.");
             }
+            return;
         }
 
         if (value.hasStreamMsg()) {
             var msg = value.getStreamMsg();
-            var id = msg.getId();
+            var globalSequenceNumber = msg.getGlobalSequenceNumber();
+            var channel = msg.getChannel();
 
             var reader = this.readers.get(msg.getChannel());
             if (reader != null) {
-                var helper = new StreamReaderHelper(reader, this.stub);
-                helper.identify(id);
+                var helper = new StreamReaderHelper(reader, this.stub, this.logger);
+                helper.identify(globalSequenceNumber);
+                helper.endingFuture.thenAccept(_void -> {
+                    this.sendProcessed(channel, globalSequenceNumber);
+                });
             } else {
-                this.logger.finest("Channel " + msg.getChannel() + " not present.");
+                this.logger.warning("Channel " + msg.getChannel() + " not present.");
             }
 
             return;
@@ -146,7 +156,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
             if (channel != null) {
                 channel.close();
             } else {
-                this.logger.finest("Channel " + msg.getChannel() + " not present.");
+                this.logger.warning("Channel " + msg.getChannel() + " not present.");
             }
 
             return;
@@ -189,11 +199,19 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
             return;
         }
-        System.err.println("Unsupported message " + value.getUnknownFields());
+
         this.logger.severe("Unsupported message " + value.getUnknownFields());
     }
 
-    private Processor<?> startProc(rdfc.Runner.Processor proc, Logger logger) throws Exception {
+    private void sendProcessed(String channel, int globalSequenceNumber) {
+        var processed = GlobalAck.newBuilder();
+        processed.setGlobalSequenceNumber(globalSequenceNumber);
+        processed.setChannel(channel);
+        var orchestratorMessage = FromRunner.newBuilder().setProcessed(processed.build());
+        this.stream.onNext(orchestratorMessage.build());
+    }
+
+    private Processor<?> startProc(rdfc.Service.Processor proc, Logger logger) throws Exception {
         var uri = proc.getUri();
         var config = proc.getConfig();
         var params = proc.getArguments();
@@ -213,34 +231,33 @@ public class Runner implements StreamObserver<RunnerMessage> {
 
     @Override
     public void onCompleted() {
-        System.err.println("onCompleted maybe I should do something");
         this.logger.severe("onCompleted maybe I should do something");
     }
 
     void sendIdentify(String uri) {
-        var builder = OrchestratorMessage.newBuilder();
-        builder.setIdentify(rdfc.Orchestrator.Identify.newBuilder().setUri(uri));
+        var builder = FromRunner.newBuilder();
+        builder.setIdentify(rdfc.Service.RunnerIdentify.newBuilder().setUri(uri));
         this.stream.onNext(builder.build());
     }
 
     void sendProcInit(String uri, Optional<String> error) {
-        var builder = OrchestratorMessage.newBuilder();
-        var initBuilder = ProcessorInit.newBuilder();
+        var builder = FromRunner.newBuilder();
+        var initBuilder = ProcessorInitialized.newBuilder();
         initBuilder.setUri(uri);
         error.ifPresent(st -> initBuilder.setError(rdfc.Common.Error.newBuilder().setCause(st)));
 
-        builder.setInit(initBuilder);
+        builder.setInitialized(initBuilder);
         this.stream.onNext(builder.build());
     }
 
     void sendMessage(String channel, ByteString data) {
-        var builder = OrchestratorMessage.newBuilder();
-        builder.setMsg(Message.newBuilder().setChannel(channel).setData(data));
+        var builder = FromRunner.newBuilder();
+        builder.setMsg(SendingMessage.newBuilder().setChannel(channel).setData(data));
         this.stream.onNext(builder.build());
     }
 
     void closeChannel(String channel) {
-        var builder = OrchestratorMessage.newBuilder();
+        var builder = FromRunner.newBuilder();
         builder.setClose(Close.newBuilder().setChannel(channel));
         this.stream.onNext(builder.build());
     }
@@ -273,7 +290,7 @@ public class Runner implements StreamObserver<RunnerMessage> {
             Class<?> clazz = loader.loadClass(this.clazz);
 
             var mapper = new ObjectMapper();
-            mapper.registerModule(new ChannelHandlerModule(runner));
+            mapper.registerModule(new ChannelHandlerModule(runner, logger));
             mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
             mapper.setTypeFactory(TypeFactory.defaultInstance().withClassLoader(loader));
 

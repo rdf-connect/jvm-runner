@@ -2,6 +2,7 @@
 package io.github.rdfc.json;
 
 import java.io.IOException;
+import java.util.logging.Logger;
 
 import io.github.rdfc.IReader;
 import io.github.rdfc.IWriter;
@@ -19,17 +20,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 
 public class ChannelHandlerModule extends SimpleModule {
-    public ChannelHandlerModule(Runner runner) {
+
+    public ChannelHandlerModule(Runner runner, Logger logger) {
         super("ChannelHandlerModule");
-        addDeserializer(IReader.class, new ReaderDeserializer(runner));
-        addDeserializer(IWriter.class, new WriterDeserializer(runner));
+        addDeserializer(IReader.class, new ReaderDeserializer(runner, logger));
+        addDeserializer(IWriter.class, new WriterDeserializer(runner, logger));
     }
 
     private static class ReaderDeserializer extends JsonDeserializer<Reader> {
+        final private Logger logger;
         private final Runner runner;
 
-        ReaderDeserializer(Runner runner) {
+        ReaderDeserializer(Runner runner, Logger logger) {
             this.runner = runner;
+            this.logger = logger;
         }
 
         @Override
@@ -49,7 +53,7 @@ public class ChannelHandlerModule extends SimpleModule {
 
                     if ("https://w3id.org/rdf-connect#Reader".equals(type)) {
                         String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
-                        var out = new Reader(id);
+                        var out = new Reader(id, this.logger);
                         this.runner.setReader(id, out);
                         return out;
                     }
@@ -63,9 +67,11 @@ public class ChannelHandlerModule extends SimpleModule {
 
     private static class WriterDeserializer extends JsonDeserializer<IWriter> {
         private final Runner runner;
+        private final Logger logger;
 
-        WriterDeserializer(Runner runner) {
+        WriterDeserializer(Runner runner, Logger logger) {
             this.runner = runner;
+            this.logger = logger;
         }
 
         @Override
@@ -85,7 +91,7 @@ public class ChannelHandlerModule extends SimpleModule {
 
                     if ("https://w3id.org/rdf-connect#Writer".equals(type)) {
                         String id = idNode != null && idNode.isTextual() ? idNode.asText() : null;
-                        var out = new Writer(id, this.runner);
+                        var out = new Writer(id, this.runner, this.logger);
                         this.runner.setWriter(id, out);
                         return out;
                     }

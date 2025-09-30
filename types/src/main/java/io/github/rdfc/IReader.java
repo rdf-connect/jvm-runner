@@ -8,6 +8,9 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 public interface IReader {
+    /**
+     * @return the URI of the channel
+     */
     String id();
 
     /**
@@ -24,18 +27,35 @@ public interface IReader {
      */
     Iter<ByteString> buffers();
 
+    Iter<String> strings();
+
     public static abstract class Iter<T> {
         protected List<Function<T, CompletableFuture<?>>> callbacks = new ArrayList<>();
+        /**
+         * endFuture is a CompletableFuture that resolves when the corresponding stream
+         * closes.
+         */
         protected CompletableFuture<Void> endFuture = new CompletableFuture<>();
+
+        public <B> Iter<B> transform(Function<T, B> apply) {
+            return new Iter<B>() {
+                public CompletableFuture<Void> on(Function<B, CompletableFuture<?>> f) {
+                    Iter.this.callbacks.add(apply.andThen(f));
+                    return endFuture;
+                }
+            };
+        }
 
         /**
          * @param apply called for each incoming piece of data
          * @return a CompletableFuture resolves when the stream is closed.
          */
         public CompletableFuture<Void> on(Consumer<T> apply) {
-            return this.on((value) -> {
-                apply.accept(value);
-                return endFuture;
+            return this.on((chunk) -> {
+                // Accept the value
+                apply.accept(chunk);
+                // Nothing to await for this chunk
+                return CompletableFuture.completedFuture(null);
             });
         }
 

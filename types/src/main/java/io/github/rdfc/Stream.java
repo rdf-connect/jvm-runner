@@ -13,7 +13,7 @@ public abstract class Stream<T> {
     public abstract CompletableFuture<Void> chunk(T chunk);
 
     /**
-     * Pushes a multiple chunks to the stream.
+     * Pushes multiple chunks to the stream.
      * 
      * @param buffers for each chunk in chunks, send it on the channel
      * @return future that resolves when the chunks have been handled

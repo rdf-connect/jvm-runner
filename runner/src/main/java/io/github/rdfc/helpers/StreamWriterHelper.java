@@ -2,58 +2,60 @@ package io.github.rdfc.helpers;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.logging.Logger;
 
 import com.google.protobuf.ByteString;
 
 import io.github.rdfc.Stream;
 import io.grpc.stub.StreamObserver;
 import rdfc.Common.DataChunk;
+import rdfc.Common.ReceivingStreamControl;
 import rdfc.Common.StreamChunk;
 import rdfc.Common.StreamIdentify;
 import rdfc.RunnerGrpc.RunnerStub;
-import rdfc.Service.StreamControl;
 
 public class StreamWriterHelper extends Stream<ByteString>
-        implements StreamObserver<StreamControl> {
+        implements StreamObserver<ReceivingStreamControl> {
 
     private final StreamObserver<StreamChunk> sendingStream;
     private final CompletableFuture<Void> awaitId = new CompletableFuture<>();
+    private final Logger logger;
 
     private Optional<CompletableFuture<Void>> nextProcessed = Optional.empty();
 
-    private StreamWriterHelper(RunnerStub stub) {
-        this.sendingStream = stub.sendStreamMessage(this);
+    private StreamWriterHelper(RunnerStub stub, Logger logger) {
+        this.logger = logger;
+        this.sendingStream = new StreamObserverWrapper<>(stub.sendStreamMessage(this), "StreamWriterHelper", logger);
     }
 
-    public static CompletableFuture<StreamWriterHelper> build(RunnerStub stub, String id) {
-        var self = new StreamWriterHelper(stub);
-        self.identify(id);
+    public static CompletableFuture<StreamWriterHelper> build(RunnerStub stub, String channel, String runner,
+            Logger logger) {
+        var self = new StreamWriterHelper(stub, logger);
+        self.identify(channel, runner);
         return self.awaitId.thenApply(_ignored -> self);
     }
 
-    private void identify(String id) {
-        var idMsg = StreamIdentify.newBuilder().setChannel(id).build();
+    private void identify(String channel, String runner) {
+        var idMsg = StreamIdentify.newBuilder().setChannel(channel).setRunner(runner).build();
         var builder = StreamChunk.newBuilder().setId(idMsg).build();
         this.sendingStream.onNext(builder);
     }
 
     @Override
-    public void onNext(StreamControl value) {
-        if (value.hasId()) {
-            if (this.awaitId.isDone()) {
-                // Log error message
-            }
-
-            this.awaitId.complete(null);
-        }
-        if (value.hasProcessed()) {
+    public void onNext(ReceivingStreamControl value) {
+        this.logger.finest("Receiving message StreamWriterHelper : " + value.getAllFields().keySet().toString());
+        if (this.awaitId.isDone()) {
             if (this.nextProcessed.isPresent()) {
                 var fut = this.nextProcessed.get();
-                fut.complete(null);
                 this.nextProcessed = Optional.empty();
+                fut.complete(null);
             } else {
-                // Log error
+                this.logger
+                        .severe("Expected a waiting nextProcessed future, has this been already handled? : "
+                                + value.getAllFields().keySet().toString());
             }
+        } else {
+            this.awaitId.complete(null);
         }
     }
 
@@ -76,6 +78,7 @@ public class StreamWriterHelper extends Stream<ByteString>
         this.sendingStream.onNext(builder.build());
         if (this.nextProcessed.isPresent()) {
             // Log error
+            this.logger.severe("Next processed is already set (streaming message)");
         }
 
         var out = new CompletableFuture<Void>();
@@ -85,6 +88,7 @@ public class StreamWriterHelper extends Stream<ByteString>
 
     @Override
     public CompletableFuture<Void> close() {
+        this.logger.finest("Streaming message close");
         this.sendingStream.onCompleted();
         return CompletableFuture.completedFuture(null);
     }

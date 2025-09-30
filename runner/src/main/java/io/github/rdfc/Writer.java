@@ -1,5 +1,6 @@
 package io.github.rdfc;
 
+import java.util.logging.*;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -15,10 +16,12 @@ public class Writer extends IWriter {
     public String id;
 
     private Optional<CompletableFuture<Void>> nextProcessed = Optional.empty();
+    private final Logger logger;
 
-    public Writer(String id, Runner runner) {
+    public Writer(String id, Runner runner, Logger logger) {
         this.id = id;
         this.runner = runner;
+        this.logger = logger;
     }
 
     @Override
@@ -31,7 +34,8 @@ public class Writer extends IWriter {
         this.runner.sendMessage(this.id, chunk);
 
         if (this.nextProcessed.isPresent()) {
-            // Log error
+            this.logger.warning(
+                    "Writer " + this.id + ": don't send a new chunk when the previous chunk is not yet awaited.");
         }
 
         var out = new CompletableFuture<Void>();
@@ -41,7 +45,7 @@ public class Writer extends IWriter {
 
     @Override
     public CompletableFuture<Stream<ByteString>> stream() {
-        return StreamWriterHelper.build(runner.stub, this.id).thenApply(st -> st);
+        return StreamWriterHelper.build(runner.stub, this.id, this.runner.uri, this.logger).thenApply(st -> st);
     }
 
     public CompletableFuture<Void> close() {
@@ -49,13 +53,13 @@ public class Writer extends IWriter {
         return CompletableFuture.completedFuture(null);
     }
 
-    public void processed(int tick) {
+    public void processed(int sequenceNumber) {
         if (this.nextProcessed.isPresent()) {
             var fut = this.nextProcessed.get();
             fut.complete(null);
             this.nextProcessed = Optional.empty();
         } else {
-            // Log error
+            this.logger.warning("Writer " + this.id + " didn't expect a processed message.");
         }
     }
 }

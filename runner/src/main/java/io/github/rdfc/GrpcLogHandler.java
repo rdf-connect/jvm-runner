@@ -26,8 +26,8 @@ public class GrpcLogHandler extends Handler
         map.put(Level.INFO, "info");
         map.put(Level.CONFIG, "debug");
         map.put(Level.FINE, "debug");
-        map.put(Level.FINER, "debug");
-        map.put(Level.FINEST, "trace");
+        map.put(Level.FINER, "verbose");
+        map.put(Level.FINEST, "silly");
         LEVEL_TO_STRING = Map.copyOf(map); // immutable map
     }
 

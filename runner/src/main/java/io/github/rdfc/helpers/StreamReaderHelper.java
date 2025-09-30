@@ -1,6 +1,7 @@
 package io.github.rdfc.helpers;
 
-import java.util.function.Consumer;
+import java.util.concurrent.CompletableFuture;
+import java.util.logging.Logger;
 
 import com.google.protobuf.ByteString;
 
@@ -9,32 +10,35 @@ import io.github.rdfc.Stream;
 import io.grpc.stub.StreamObserver;
 import rdfc.Common;
 import rdfc.Common.DataChunk;
+import rdfc.Common.SendingStreamControl;
 import rdfc.RunnerGrpc.RunnerStub;
-import rdfc.Service.StreamControl;
 
-public class StreamReaderHelper implements StreamObserver<Common.DataChunk>, Consumer<Void> {
+public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
     private final Stream<ByteString> consumingStream;
-    private final StreamObserver<StreamControl> sendingStream;
+    private final StreamObserver<SendingStreamControl> sendingStream;
     private int at = 0;
 
-    public StreamReaderHelper(Reader reader, RunnerStub stub) {
-        this.consumingStream = reader.stream(this);
-        this.sendingStream = stub.receiveStreamMessage(this);
+    public final CompletableFuture<Void> endingFuture = new CompletableFuture<>();
+    public final Logger logger;
+
+    public StreamReaderHelper(Reader reader, RunnerStub stub, Logger logger) {
+        this.logger = logger;
+        this.consumingStream = reader.stream(this::sendStreamControlMessage);
+        this.sendingStream = new StreamObserverWrapper<>(stub.receiveStreamMessage(this), "StreamReaderHelper", logger);
     }
 
     public void identify(int id) {
-        var identify = StreamControl.newBuilder();
-        identify.setId(id);
+        var identify = SendingStreamControl.newBuilder();
+        identify.setGlobalSequenceNumber(id);
         this.sendingStream.onNext(identify.build());
     }
 
     /**
      * Between each incoming message, sends an acknowledgement message back
      */
-    @Override
-    public void accept(Void t) {
-        StreamControl control = StreamControl.newBuilder()
-                .setProcessed(this.at++)
+    public void sendStreamControlMessage() {
+        SendingStreamControl control = SendingStreamControl.newBuilder()
+                .setStreamSequenceNumber(this.at++)
                 .build();
         this.sendingStream.onNext(control);
     }
@@ -44,17 +48,23 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk>, Con
      */
     @Override
     public void onNext(DataChunk value) {
+        this.logger.finest("Receiving message StreamReaderHelper : " + value.getAllFields().keySet().toString());
         this.consumingStream.chunk(value.getData());
     }
 
     @Override
     public void onError(Throwable t) {
-        this.consumingStream.close();
+        this.logger.severe("Error " + t);
+        this.consumingStream.close().thenAccept(_void -> {
+            this.endingFuture.complete(null);
+        });
     }
 
     @Override
     public void onCompleted() {
-        this.consumingStream.close();
+        this.logger.finest("onCompleted");
+        this.consumingStream.close().thenAccept(_void -> {
+            this.endingFuture.complete(null);
+        });
     }
-
 }

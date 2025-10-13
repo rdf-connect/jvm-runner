@@ -19,14 +19,23 @@ import com.fasterxml.jackson.databind.JsonDeserializer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 
+/**
+ * ChannelHandlerModule is a module to hooks into Jackson to deserialize
+ * processor arguments.
+ */
 public class ChannelHandlerModule extends SimpleModule {
-
     public ChannelHandlerModule(Runner runner, Logger logger) {
         super("ChannelHandlerModule");
         addDeserializer(IReader.class, new ReaderDeserializer(runner, logger));
         addDeserializer(IWriter.class, new WriterDeserializer(runner, logger));
     }
 
+    /**
+     * Tries to parse a reader.
+     * If this fails, another deserializer will try to deserialize.
+     * So we fail when the value of @type is not equal to
+     * https://w3id.org/rdf-connect#Reader
+     */
     private static class ReaderDeserializer extends JsonDeserializer<Reader> {
         final private Logger logger;
         private final Runner runner;
@@ -60,11 +69,16 @@ public class ChannelHandlerModule extends SimpleModule {
                 }
             }
 
-            // return codec.treeToValue(node, Object.class);
             throw new JsonParseException("Failed to parse reader");
         }
     }
 
+    /**
+     * Tries to parse a writer.
+     * If this fails, another deserializer will try to deserialize.
+     * So we fail when the value of @type is not equal to
+     * https://w3id.org/rdf-connect#Writer
+     */
     private static class WriterDeserializer extends JsonDeserializer<IWriter> {
         private final Runner runner;
         private final Logger logger;
@@ -98,7 +112,7 @@ public class ChannelHandlerModule extends SimpleModule {
                 }
             }
 
-            throw new JsonParseException("Failed to parse reader");
+            throw new JsonParseException("Failed to parse writer");
         }
     }
 }

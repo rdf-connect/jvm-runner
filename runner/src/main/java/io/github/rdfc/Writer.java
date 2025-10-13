@@ -29,6 +29,9 @@ public class Writer extends IWriter {
         return this.id;
     }
 
+    /**
+     * Send a message and only complete when a processed message is received
+     */
     @Override
     public CompletableFuture<Void> chunk(ByteString chunk) {
         this.runner.sendMessage(this.id, chunk);
@@ -45,7 +48,11 @@ public class Writer extends IWriter {
 
     @Override
     public CompletableFuture<Stream<ByteString>> stream() {
-        return StreamWriterHelper.build(runner.stub, this.id, this.runner.uri, this.logger).thenApply(st -> st);
+        var acknowledged = new CompletableFuture<Void>();
+        this.nextProcessed = Optional.of(acknowledged);
+        return StreamWriterHelper.build(runner.stub, this.id, this.runner.uri, acknowledged, this.logger)
+                // Type fixing
+                .thenApply(st -> st);
     }
 
     public CompletableFuture<Void> close() {
@@ -53,6 +60,11 @@ public class Writer extends IWriter {
         return CompletableFuture.completedFuture(null);
     }
 
+    /**
+     * A processed message was received, let the previous sending chunk complete.
+     * 
+     * @param sequenceNumber that is processed
+     */
     public void processed(int sequenceNumber) {
         if (this.nextProcessed.isPresent()) {
             var fut = this.nextProcessed.get();

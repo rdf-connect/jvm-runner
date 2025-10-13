@@ -48,7 +48,7 @@ public class Reader implements IReader {
     }
 
     /**
-     * The runner receives a single byestring message.
+     * The runner receives a single ByteString message.
      * 
      * @param buffer the received message
      * @return a future that completes when all consumers have handled the message
@@ -148,6 +148,26 @@ public class Reader implements IReader {
         }
     }
 
+    /**
+     * A SingleIter is returned when someone expects to handle StreamMessages but
+     * only a single message is received.
+     * For each message, the user will consume data from the incoming stream
+     * message, but the data is already present, so the data is just _sent_
+     * 
+     * <pre>
+     * <code>
+    * void setupReader(IReader reader) {
+    *   reader.streams().on(iter -> 
+    *     // Chunk is already present in iter and is already received
+    *     // So this function is late, so SingleIter will just sent the chunk to the callback
+    *     iter.on(chunk -> 
+    *       System.out.println(chunk.toString());
+    *     )
+    *   )
+    * }
+    * </code>
+     * </pre>
+     */
     private static class SingleIter<T> extends Iter<T> {
         private T item;
 
@@ -163,6 +183,8 @@ public class Reader implements IReader {
 
     static class StreamIter<T> extends Iter<T> {
         CompletableFuture<Void> push(T item) {
+            // Each listener should handle the incoming chunk
+            // The chunk is handled when all listeners are finished
             var futures = this.callbacks.stream()
                     .map(cb -> cb.apply(item))
                     .toArray(CompletableFuture[]::new);

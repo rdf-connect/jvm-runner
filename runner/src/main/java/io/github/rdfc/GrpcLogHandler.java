@@ -75,6 +75,7 @@ public class GrpcLogHandler extends Handler
         this.stream.onCompleted();
     }
 
+    // This is only a sending stream, we don't expect incoming messages
     @Override
     public void onNext(Empty value) {
         throw new UnsupportedOperationException("Unimplemented method 'onNext'");

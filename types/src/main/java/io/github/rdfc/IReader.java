@@ -7,6 +7,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+/**
+ * Data is received from a channel using an IReader.
+ * Either consume the data as Streams, Buffers or Strings.
+ * When a message comes in that is not the expected type, the IReader will
+ * upcast the message to the expected type.
+ */
 public interface IReader {
     /**
      * @return the URI of the channel
@@ -29,6 +35,12 @@ public interface IReader {
 
     Iter<String> strings();
 
+    /**
+     * This remembers consuming callbacks for each message `T`.
+     * Each callback is a CompletableFuture, each T is only handled
+     * This is the reading side of the stream, so functions that push data into it
+     * are missing.
+     */
     public static abstract class Iter<T> {
         protected List<Function<T, CompletableFuture<?>>> callbacks = new ArrayList<>();
         /**

@@ -7,6 +7,9 @@ import com.google.protobuf.GeneratedMessage.ExtendableMessage;
 
 import io.grpc.stub.StreamObserver;
 
+/**
+ * Simple wrapper for StreamObservers logging all outgoing messages.
+ */
 public class StreamObserverWrapper<T extends ExtendableMessage<?>> implements StreamObserver<T> {
 
     private final StreamObserver<T> wrapped;

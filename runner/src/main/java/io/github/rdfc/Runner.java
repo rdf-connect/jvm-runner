@@ -10,7 +10,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.*;
 
 import java.util.logging.*;
@@ -38,24 +37,30 @@ import rdfc.Service.ToRunner;
  */
 public class Runner implements StreamObserver<ToRunner> {
 
-    public StreamObserver<FromRunner> stream;
+    public final StreamObserver<FromRunner> stream;
 
-    protected RunnerGrpc.RunnerStub stub;
+    protected final RunnerGrpc.RunnerStub stub;
 
-    protected HashMap<String, Reader> readers = new HashMap<>();
-    protected HashMap<String, Writer> writers = new HashMap<>();
-    protected HashMap<String, Processor<?>> processors = new HashMap<>();
+    protected final HashMap<String, Reader> readers = new HashMap<>();
+    protected final HashMap<String, Writer> writers = new HashMap<>();
+    protected final HashMap<String, Processor<?>> processors = new HashMap<>();
 
+    /**
+     * Mapper used to deserialize the config for each processor.
+     */
     protected final ObjectMapper mapper;
 
     private final AtomicInteger awaiting = new AtomicInteger(0);
+    /**
+     * Function to call when all processors are finished.
+     * This will close the GRPC channel.
+     */
     private final Runnable onComplete;
     private final Logger logger;
 
     protected final String uri;
 
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete) {
-
         var logger = Logger.getLogger("");
         logger.setLevel(Level.ALL);
         for (Handler h : logger.getHandlers()) {
@@ -70,10 +75,11 @@ public class Runner implements StreamObserver<ToRunner> {
         this.stub = stub;
         this.mapper = new ObjectMapper();
         this.mapper.registerModule(new ChannelHandlerModule(this, this.logger));
+        // The mapper can ignore properties like `@type`, `@context` from JSON-LD
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-        this.logger.info("Hello from the runner!");
-        this.sendIdentify(uri);
+        this.sendIdentify();
+        this.logger.info("JVM runner identified");
     }
 
     public void setReader(String uri, Reader reader) {
@@ -84,6 +90,10 @@ public class Runner implements StreamObserver<ToRunner> {
         this.writers.put(uri, writer);
     }
 
+    /**
+     * A processor is finished, if all processors are finished, we chan shut this
+     * runner down.
+     */
     private void decreaseAndCheckEnd() {
         var v = this.awaiting.decrementAndGet();
         if (v == 0) {
@@ -102,13 +112,11 @@ public class Runner implements StreamObserver<ToRunner> {
 
         if (value.hasMsg()) {
             var msg = value.getMsg();
-            var data = msg.getData();
-            var globalSequenceNumber = msg.getGlobalSequenceNumber();
-            var channel = msg.getChannel();
             var reader = this.readers.get(msg.getChannel());
             if (reader != null) {
-                reader.msg(data).thenAccept(_void -> {
-                    sendProcessed(channel, globalSequenceNumber);
+                reader.msg(msg.getData()).thenAccept(_void -> {
+                    // when the message has been handled, send an acknowledgement
+                    sendProcessed(msg.getChannel(), msg.getGlobalSequenceNumber());
                 });
             } else {
                 this.logger.warning("Channel " + msg.getChannel() + " not present.");
@@ -118,14 +126,12 @@ public class Runner implements StreamObserver<ToRunner> {
 
         if (value.hasProcessed()) {
             var processed = value.getProcessed();
-            var channel = processed.getChannel();
-            var localSequenceNumber = processed.getLocalSequenceNumber();
-            var writer = this.writers.get(channel);
+            var writer = this.writers.get(processed.getChannel());
             if (writer != null) {
-                writer.processed(localSequenceNumber);
+                writer.processed(processed.getLocalSequenceNumber());
 
             } else {
-                this.logger.warning("Channel " + channel + " not present.");
+                this.logger.warning("Channel " + processed.getChannel() + " not present.");
             }
             return;
         }
@@ -135,15 +141,18 @@ public class Runner implements StreamObserver<ToRunner> {
             var globalSequenceNumber = msg.getGlobalSequenceNumber();
             var channel = msg.getChannel();
 
-            var reader = this.readers.get(msg.getChannel());
+            var reader = this.readers.get(channel);
             if (reader != null) {
+                // When a stream message comes in the StreamReaderHelper will connect to the
+                // orchestrator and handle everything related to this stream message
                 var helper = new StreamReaderHelper(reader, this.stub, this.logger);
                 helper.identify(globalSequenceNumber);
                 helper.endingFuture.thenAccept(_void -> {
+                    // When it is finished, we send an acknowledgement
                     this.sendProcessed(channel, globalSequenceNumber);
                 });
             } else {
-                this.logger.warning("Channel " + msg.getChannel() + " not present.");
+                this.logger.warning("Channel " + channel + " not present.");
             }
 
             return;
@@ -164,6 +173,10 @@ public class Runner implements StreamObserver<ToRunner> {
 
         if (value.hasStart()) {
             this.processors.forEach((k, v) -> {
+                // All processors are allowed to produce data
+                // After the production is finished, check for end
+                // (when starting the processor we added 2: one for transform and one for
+                // produce)
                 v.produce().thenAccept(st -> {
                     this.logger.fine("Processor " + k + " finished producing.");
                     this.decreaseAndCheckEnd();
@@ -179,19 +192,22 @@ public class Runner implements StreamObserver<ToRunner> {
 
             var procLogger = GrpcLogHandler.createLogger(stub, uri, this.uri);
             try {
-                var latch = new CountDownLatch(1);
                 Processor<?> processor = this.startProc(proc, procLogger);
                 processor.init().thenAccept(_void -> {
+                    // one is decreased when the transform is finished
+                    // one is decreased when the produce is finished
                     this.awaiting.updateAndGet(x -> x + 2);
                     processor.transform().thenAccept(st -> {
                         this.logger.fine("Processor " + uri + " finished transforming.");
                         this.decreaseAndCheckEnd();
                     });
-                    latch.countDown();
+                    // This processor is initialized: init is awaited and transform is started
+                    this.sendProcInit(uri, Optional.empty());
+                }).exceptionally(e -> {
+                    e.printStackTrace();
+                    this.sendProcInit(uri, Optional.of(e.toString()));
+                    return null;
                 });
-                latch.await();
-
-                this.sendProcInit(uri, Optional.empty());
             } catch (Exception e) {
                 e.printStackTrace();
                 this.sendProcInit(uri, Optional.of(e.toString()));
@@ -203,6 +219,14 @@ public class Runner implements StreamObserver<ToRunner> {
         this.logger.severe("Unsupported message " + value.getUnknownFields());
     }
 
+    /**
+     * Sends a processed message to the orchestrator indicating that a message has
+     * been handled.
+     * This is either a _normal_ message or a streaming message
+     * 
+     * @param channel              that carried the message
+     * @param globalSequenceNumber identifier of the message (per channel)
+     */
     private void sendProcessed(String channel, int globalSequenceNumber) {
         var processed = GlobalAck.newBuilder();
         processed.setGlobalSequenceNumber(globalSequenceNumber);
@@ -234,12 +258,22 @@ public class Runner implements StreamObserver<ToRunner> {
         this.logger.severe("onCompleted maybe I should do something");
     }
 
-    void sendIdentify(String uri) {
+    /**
+     * The runner is set up and the orchestrator is allowed to send processors to
+     * this runner.
+     */
+    void sendIdentify() {
         var builder = FromRunner.newBuilder();
-        builder.setIdentify(rdfc.Service.RunnerIdentify.newBuilder().setUri(uri));
+        builder.setIdentify(rdfc.Service.RunnerIdentify.newBuilder().setUri(this.uri));
         this.stream.onNext(builder.build());
     }
 
+    /**
+     * Initializing the processor is done
+     * 
+     * @param uri   of the processor
+     * @param error potential error that was raised when starting the processor
+     */
     void sendProcInit(String uri, Optional<String> error) {
         var builder = FromRunner.newBuilder();
         var initBuilder = ProcessorInitialized.newBuilder();
@@ -250,18 +284,34 @@ public class Runner implements StreamObserver<ToRunner> {
         this.stream.onNext(builder.build());
     }
 
+    /**
+     * Send a message to the default channel
+     * 
+     * @param channel to send the message to
+     * @param data    data to send
+     */
     void sendMessage(String channel, ByteString data) {
         var builder = FromRunner.newBuilder();
         builder.setMsg(SendingMessage.newBuilder().setChannel(channel).setData(data));
         this.stream.onNext(builder.build());
     }
 
+    /**
+     * Send a close msg to the default channel
+     * 
+     * @param channel to close
+     */
     void closeChannel(String channel) {
         var builder = FromRunner.newBuilder();
         builder.setClose(Close.newBuilder().setChannel(channel));
         this.stream.onNext(builder.build());
     }
 
+    /**
+     * Configuration class that each processor implements.
+     * It contains the jar location of the processor and the class that implements
+     * the processor _in_ this Jar.
+     */
     private static class Config {
         public String jar;
         public String clazz;
@@ -270,6 +320,8 @@ public class Runner implements StreamObserver<ToRunner> {
             URL jarUrl = new URI(this.jar).toURL();
 
             Path jarPath;
+            // if the jar is still remote, download the entire Jar to a temporary location
+            // Otherwise, just point to the physical jar location.
             if (jarUrl.getProtocol().equalsIgnoreCase("http") || jarUrl.getProtocol().equalsIgnoreCase("https")) {
                 // Remote JAR, download it
                 logger.info("Downloading JAR from " + this.jar);
@@ -289,12 +341,14 @@ public class Runner implements StreamObserver<ToRunner> {
 
             Class<?> clazz = loader.loadClass(this.clazz);
 
+            // Create a mapper to deserialize the arguments to jvm objects
+            // This mapper also instantiates the channels (readers and writers)
             var mapper = new ObjectMapper();
             mapper.registerModule(new ChannelHandlerModule(runner, logger));
             mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
             mapper.setTypeFactory(TypeFactory.defaultInstance().withClassLoader(loader));
 
-            // Find constructor with one argument
+            // Find correct constructor with two argument (arguments and logger)
             Constructor<?> constructor = null;
             for (Constructor<?> c : clazz.getConstructors()) {
                 if (c.getParameterCount() == 2) {
@@ -304,7 +358,7 @@ public class Runner implements StreamObserver<ToRunner> {
             }
 
             if (constructor == null) {
-                throw new RuntimeException("No single-arg constructor found");
+                throw new RuntimeException("No two-arg constructor found");
             }
 
             Class<?> paramType = constructor.getParameterTypes()[0];
@@ -312,7 +366,7 @@ public class Runner implements StreamObserver<ToRunner> {
             // Use Jackson to deserialize JSON into the param type
             Object arg = mapper.readValue(arguments, paramType);
 
-            // Instantiate using default constructor
+            // Instantiate using the constructor
             constructor.setAccessible(true);
             return (Processor<?>) constructor.newInstance(arg, logger);
         }

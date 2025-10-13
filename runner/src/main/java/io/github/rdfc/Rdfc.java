@@ -16,9 +16,7 @@ public class Rdfc {
 
         RunnerGrpc.RunnerStub stub = RunnerGrpc.newStub(channel);
 
-        new Runner(stub, args[1], () -> {
-            channel.shutdownNow();
-        });
+        new Runner(stub, args[1], channel::shutdownNow);
 
         channel.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
     }

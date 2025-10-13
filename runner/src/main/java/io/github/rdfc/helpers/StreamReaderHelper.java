@@ -16,10 +16,10 @@ import rdfc.RunnerGrpc.RunnerStub;
 public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
     private final Stream<ByteString> consumingStream;
     private final StreamObserver<SendingStreamControl> sendingStream;
-    private int at = 0;
-
     public final CompletableFuture<Void> endingFuture = new CompletableFuture<>();
     public final Logger logger;
+
+    private int at = 0;
 
     public StreamReaderHelper(Reader reader, RunnerStub stub, Logger logger) {
         this.logger = logger;

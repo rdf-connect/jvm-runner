@@ -2,7 +2,7 @@ plugins {
     // Apply the java-library plugin for API and implementation separation.
     id 'java'
     id 'maven-publish'   // ← this is required for `publishing { ... }`
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id("com.gradleup.shadow") version "9.2.2"
 }
 
 tasks.register("descriptorArtifact", Copy) {
@@ -30,7 +30,10 @@ tasks.named('shadowJar') {
 }
 
 shadowJar {
-    mergeServiceFiles()
+  duplicatesStrategy = DuplicatesStrategy.INCLUDE // Or something else.
+    mergeServiceFiles {
+        include("META-INF/services/io.grpc.*")
+    }
 }
 
 // register a "fake jar" if Maven requires a Jar type
@@ -42,7 +45,7 @@ tasks.register("indexJar", Jar) {
 
 dependencies {
     implementation project(path: ":types")
-	implementation 'com.github.rdf-connect:proto:master-SNAPSHOT'
+	implementation 'com.github.rdf-connect:proto:2ae53fd'
 
     implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'

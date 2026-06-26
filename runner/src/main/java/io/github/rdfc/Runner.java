@@ -178,8 +178,11 @@ public class Runner implements StreamObserver<ToRunner> {
                 // (when starting the processor we added 2: one for transform and one for
                 // produce)
                 v.produce().thenAccept(st -> {
-                    this.logger.fine("Processor " + k + " finished producing.");
                     this.decreaseAndCheckEnd();
+                }).exceptionally(e -> {
+                    this.logger.severe("Processor " + k + " produce exception: " + e);
+                    e.printStackTrace(System.err);
+                    return null;
                 });
             });
 
@@ -198,8 +201,11 @@ public class Runner implements StreamObserver<ToRunner> {
                     // one is decreased when the produce is finished
                     this.awaiting.updateAndGet(x -> x + 2);
                     processor.transform().thenAccept(st -> {
-                        this.logger.fine("Processor " + uri + " finished transforming.");
                         this.decreaseAndCheckEnd();
+                    }).exceptionally(e -> {
+                        this.logger.severe("Processor " + uri + " transform exception: " + e);
+                        e.printStackTrace(System.err);
+                        return null;
                     });
                     // This processor is initialized: init is awaited and transform is started
                     this.sendProcInit(uri, Optional.empty());

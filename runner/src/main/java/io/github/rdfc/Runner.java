@@ -114,7 +114,11 @@ public class Runner implements StreamObserver<ToRunner> {
             var msg = value.getMsg();
             var reader = this.readers.get(msg.getChannel());
             if (reader != null) {
-                reader.msg(msg.getData()).thenAccept(_void -> {
+                reader.msg(msg.getData()).whenComplete((_void, e) -> {
+                    if (e != null) {
+                        this.logger.severe("Error handling message on channel " + msg.getChannel() + ": " + e);
+                        e.printStackTrace(System.err);
+                    }
                     // when the message has been handled, send an acknowledgement
                     sendProcessed(msg.getChannel(), msg.getGlobalSequenceNumber());
                 });
@@ -147,7 +151,11 @@ public class Runner implements StreamObserver<ToRunner> {
                 // orchestrator and handle everything related to this stream message
                 var helper = new StreamReaderHelper(reader, this.stub, this.logger);
                 helper.identify(globalSequenceNumber);
-                helper.endingFuture.thenAccept(_void -> {
+                helper.endingFuture.whenComplete((_void, e) -> {
+                    if (e != null) {
+                        this.logger.severe("Error handling stream message on channel " + channel + ": " + e);
+                        e.printStackTrace(System.err);
+                    }
                     // When it is finished, we send an acknowledgement
                     this.sendProcessed(channel, globalSequenceNumber);
                 });
@@ -177,12 +185,12 @@ public class Runner implements StreamObserver<ToRunner> {
                 // After the production is finished, check for end
                 // (when starting the processor we added 2: one for transform and one for
                 // produce)
-                v.produce().thenAccept(st -> {
+                v.produce().whenComplete((output, e) -> {
+                    if (e != null) {
+                        this.logger.severe("Processor " + k + " produce exception: " + e);
+                        e.printStackTrace(System.err);
+                    }
                     this.decreaseAndCheckEnd();
-                }).exceptionally(e -> {
-                    this.logger.severe("Processor " + k + " produce exception: " + e);
-                    e.printStackTrace(System.err);
-                    return null;
                 });
             });
 
@@ -200,12 +208,12 @@ public class Runner implements StreamObserver<ToRunner> {
                     // one is decreased when the transform is finished
                     // one is decreased when the produce is finished
                     this.awaiting.updateAndGet(x -> x + 2);
-                    processor.transform().thenAccept(st -> {
+                    processor.transform().whenComplete((output, e) -> {
+                        if (e != null) {
+                            this.logger.severe("Processor " + uri + " transform exception: " + e);
+                            e.printStackTrace(System.err);
+                        }
                         this.decreaseAndCheckEnd();
-                    }).exceptionally(e -> {
-                        this.logger.severe("Processor " + uri + " transform exception: " + e);
-                        e.printStackTrace(System.err);
-                        return null;
                     });
                     // This processor is initialized: init is awaited and transform is started
                     this.sendProcInit(uri, Optional.empty());

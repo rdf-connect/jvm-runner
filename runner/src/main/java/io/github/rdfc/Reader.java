@@ -127,7 +127,11 @@ public class Reader implements IReader {
                     .toArray(CompletableFuture[]::new);
 
             return CompletableFuture.allOf(streamFutures)
-                    .thenAccept(_void -> {
+                    .whenComplete((_void, e) -> {
+                        if (e != null) {
+                            this.logger.severe("Error handling stream chunk: " + e);
+                            e.printStackTrace(System.err);
+                        }
                         this.logger.finest("Stream chunk handled");
                         betweenChunks.run();
                     });

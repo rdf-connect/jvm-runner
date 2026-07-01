@@ -55,7 +55,11 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
     @Override
     public void onError(Throwable t) {
         this.logger.severe("Error " + t);
-        this.consumingStream.close().thenAccept(_void -> {
+        this.consumingStream.close().whenComplete((_void, e) -> {
+            if (e != null) {
+                this.logger.severe("Error closing stream after error: " + e);
+                e.printStackTrace(System.err);
+            }
             this.endingFuture.complete(null);
         });
     }
@@ -63,7 +67,11 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
     @Override
     public void onCompleted() {
         this.logger.finest("onCompleted");
-        this.consumingStream.close().thenAccept(_void -> {
+        this.consumingStream.close().whenComplete((_void, e) -> {
+            if (e != null) {
+                this.logger.severe("Error closing stream: " + e);
+                e.printStackTrace(System.err);
+            }
             this.endingFuture.complete(null);
         });
     }

@@ -80,7 +80,7 @@ public final class RdfcServer {
 
         try {
             server.start();
-        } catch (ServerStartupError e) {
+        } catch (ServerStartupException e) {
             LOGGER.severe(e.getMessage());
             System.exit(1);
             return;

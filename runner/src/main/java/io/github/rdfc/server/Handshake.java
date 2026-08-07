@@ -11,6 +11,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -49,7 +50,14 @@ public final class Handshake {
      */
     static final int MAX_LINE = 1024;
 
-    /** How long a connection may stay silent before it is dropped. */
+    /**
+     * How long the whole handshake may take, from the first read to the newline.
+     *
+     * A <em>total</em> budget, not an idle one. A per-read timeout would let a
+     * peer that dribbles one byte just inside the interval hold the connection —
+     * and the slot {@link RunnerServer} counts it in — for as long as it takes to
+     * reach {@link #MAX_LINE}, which at that rate is well over an hour.
+     */
     static final int TIMEOUT_MILLIS = 5000;
 
     /**
@@ -67,15 +75,15 @@ public final class Handshake {
     /**
      * Reads the IRI line off a freshly accepted connection.
      *
-     * The socket keeps a read timeout of {@link #TIMEOUT_MILLIS} for the
-     * duration of the handshake and gets its previous one back afterwards — on
-     * the way out through a failure as well, since the caller may want to keep
-     * the socket around to report on it.
+     * The whole handshake gets {@link #TIMEOUT_MILLIS} and the socket gets its
+     * previous read timeout back afterwards — on the way out through a failure
+     * as well, since the caller may want to keep the socket around to report on
+     * it.
      *
      * @param socket the accepted orchestrator connection
      * @return the IRI and any bytes read past the newline
-     * @throws HandshakeException when the peer sent no usable line: nothing at
-     *                            all within the timeout, an end of stream
+     * @throws HandshakeException when the peer sent no usable line: no complete
+     *                            line within the timeout, an end of stream
      *                            before the newline, more than
      *                            {@link #MAX_LINE} bytes without one, bytes
      *                            that are not UTF-8, or an empty line
@@ -92,13 +100,13 @@ public final class Handshake {
      * seconds to watch a silent peer be dropped.
      *
      * @param socket        the accepted orchestrator connection
-     * @param timeoutMillis how long the peer may stay silent
+     * @param timeoutMillis how long the whole handshake may take
      */
     static Result read(Socket socket, int timeoutMillis) throws HandshakeException, IOException {
         var previous = socket.getSoTimeout();
-        socket.setSoTimeout(timeoutMillis);
+        var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         try {
-            return scan(socket.getInputStream());
+            return scan(socket, deadline);
         } finally {
             restore(socket, previous);
         }
@@ -111,12 +119,18 @@ public final class Handshake {
      * read that finally contained the newline is the remainder. Nothing is
      * pushed back and nothing is buffered inside this class — what is not
      * returned has not been read.
+     *
+     * Every read is given only what is left of the budget, so however many reads
+     * it takes they cannot together outlast the deadline.
      */
-    private static Result scan(InputStream in) throws HandshakeException, IOException {
+    private static Result scan(Socket socket, long deadline) throws HandshakeException, IOException {
+        var in = socket.getInputStream();
         var line = new ByteArrayOutputStream();
         var chunk = new byte[CHUNK];
 
         while (true) {
+            socket.setSoTimeout(remaining(deadline));
+
             int read;
             try {
                 read = in.read(chunk);
@@ -142,6 +156,29 @@ public final class Handshake {
 
             return new Result(decode(line.toByteArray()), Arrays.copyOfRange(chunk, newline + 1, read));
         }
+    }
+
+    /**
+     * What is left of the handshake budget, as a read timeout.
+     *
+     * Never zero: {@code setSoTimeout(0)} means <em>wait forever</em>, which is
+     * the one thing a budget that has all but run out must not turn into. A
+     * budget that has actually run out does not come back as a timeout value at
+     * all — it is the failure.
+     *
+     * @param deadline when the handshake has to be over, on {@link System#nanoTime}
+     * @return the milliseconds left, at least one
+     * @throws HandshakeException when there is nothing left
+     */
+    private static int remaining(long deadline) throws HandshakeException {
+        var left = deadline - System.nanoTime();
+        if (left <= 0) {
+            throw new HandshakeException(HandshakeException.Reason.TIMEOUT,
+                    "no runner IRI within the handshake timeout");
+        }
+
+        var millis = TimeUnit.NANOSECONDS.toMillis(left);
+        return (int) Math.max(1, Math.min(millis, Integer.MAX_VALUE));
     }
 
     private static int indexOfNewline(byte[] buffer, int length) {

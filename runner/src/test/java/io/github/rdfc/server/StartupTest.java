@@ -133,7 +133,7 @@ class StartupTest {
         try {
             RunnerServer second = new RunnerServer(config, first.boundGrpcPort(), 0,
                     RunnerServer.MAX_GRPC_CONNECTIONS);
-            ServerStartupError error = assertThrows(ServerStartupError.class, second::start);
+            ServerStartupException error = assertThrows(ServerStartupException.class, second::start);
 
             assertTrue(error.getMessage().contains("gRPC"), error.getMessage());
             assertTrue(error.getMessage().contains(Integer.toString(first.boundGrpcPort())), error.getMessage());
@@ -163,7 +163,7 @@ class StartupTest {
         try {
             RunnerServer second = new RunnerServer(config, grpcPort, first.boundHttpPort(),
                     RunnerServer.MAX_GRPC_CONNECTIONS);
-            ServerStartupError error = assertThrows(ServerStartupError.class, second::start);
+            ServerStartupException error = assertThrows(ServerStartupException.class, second::start);
 
             assertTrue(error.getMessage().contains("HTTP"), error.getMessage());
             assertTrue(error.getMessage().contains(Integer.toString(first.boundHttpPort())), error.getMessage());

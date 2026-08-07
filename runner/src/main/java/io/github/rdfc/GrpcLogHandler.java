@@ -19,6 +19,18 @@ import rdfc.Service.LogMessage;
 
 public class GrpcLogHandler extends Handler
         implements StreamObserver<Empty> {
+    /**
+     * For the one thing this class may say through a Logger: that a stream ended
+     * after its handler was closed.
+     *
+     * Safe only because it is <b>named</b>. A GrpcLogHandler is only ever added to
+     * the anonymous logger {@link #loggerFor} builds, so nothing this logger's
+     * records reach is a GrpcLogHandler and the record cannot come back in here.
+     * Everything else on the response side still goes to stderr — see the note
+     * there.
+     */
+    private static final Logger LOGGER = Logger.getLogger(GrpcLogHandler.class.getName());
+
     public static final Map<Level, String> LEVEL_TO_STRING;
 
     /**
@@ -214,10 +226,12 @@ public class GrpcLogHandler extends Handler
 
     // This is only a sending stream, we don't expect incoming messages.
     //
-    // None of these three may throw, and none of them may log through a Logger
-    // either: this handler *is* where logging ends up, so that would come straight
-    // back in here (and, on a stream that just died, keep failing). They write to
-    // stderr, which is the only place left.
+    // None of these three may throw, and none of them may log through a logger this
+    // handler is on: this handler *is* where logging ends up, so that would come
+    // straight back in here (and, on a stream that just died, keep failing). What
+    // an operator has to see goes to stderr; the one line that is merely
+    // diagnostic goes through the named LOGGER above, which no handler of this
+    // class is attached to.
 
     @Override
     public void onNext(Empty value) {
@@ -225,11 +239,26 @@ public class GrpcLogHandler extends Handler
         // something anyway is not a reason to fall over
     }
 
+    /**
+     * The log stream died. Everything logged from here on is dropped, sending it
+     * would only raise the same failure again.
+     *
+     * A stream that dies <em>after</em> this handler was closed is the teardown
+     * finishing, not a fault: half-closing the call and then dropping the channel
+     * is exactly what the runner does on its way out, and gRPC answers it with an
+     * UNAVAILABLE here. Saying so on stderr turned a clean shutdown into a wall of
+     * failure lines, one per handler. Only what happens on a stream nobody closed
+     * is worth the operator's attention.
+     */
     @Override
     public void onError(Throwable t) {
-        // The log stream died. Everything logged from here on is dropped, sending
-        // it would only raise the same failure again.
         this.broken = true;
+
+        if (this.closed.get()) {
+            LOGGER.log(Level.FINE, "the log stream to the orchestrator ended after this handler was closed", t);
+            return;
+        }
+
         System.err.println("The log stream to the orchestrator failed: " + t);
     }
 

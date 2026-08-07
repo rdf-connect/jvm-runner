@@ -14,6 +14,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -280,6 +281,49 @@ class HandshakeTest {
 
         var elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
         assertTrue(elapsed < 2000, "the handshake waited " + elapsed + " ms, well past its timeout");
+    }
+
+    /**
+     * The budget is the whole handshake, not the gap between two bytes.
+     *
+     * A peer that sends a byte just often enough to keep resetting a per-read
+     * timeout would otherwise hold this connection — and the slot the server
+     * counts it in — until it has sent {@link Handshake#MAX_LINE} bytes, which
+     * at that rate is not minutes but hours. It is cut off when the total budget
+     * is gone, however busy it has been keeping it alive.
+     */
+    @Test
+    void aPeerThatDripsBytesIsDroppedWhenTheBudgetRunsOut() throws Exception {
+        var budget = 300;
+        var drip = 100;
+
+        var dripping = new AtomicBoolean(true);
+        var dripper = new Thread(() -> {
+            try {
+                while (dripping.get()) {
+                    send("a"); // never a newline
+                    Thread.sleep(drip);
+                }
+            } catch (Exception ignored) {
+                // the test is over and its sockets are gone
+            }
+        });
+        dripper.setDaemon(true);
+        dripper.start();
+
+        try {
+            var started = System.nanoTime();
+
+            assertEquals(HandshakeException.Reason.TIMEOUT, reasonOf(() -> Handshake.read(this.server, budget)));
+
+            var elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            assertTrue(elapsed >= budget - 50, "the handshake gave up after " + elapsed + " ms, short of its budget");
+            assertTrue(elapsed < 2000, "the handshake let a dripping peer hold on for " + elapsed + " ms");
+            assertEquals(0, this.server.getSoTimeout(), "a timed-out handshake left its read timeout on the socket");
+        } finally {
+            dripping.set(false);
+            dripper.join(2000);
+        }
     }
 
     /** Java 11 has no {@code String.repeat}. */

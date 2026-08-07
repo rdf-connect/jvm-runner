@@ -8,14 +8,14 @@ package io.github.rdfc.server;
  * property to change — and exit, rather than a stack trace of a socket bind that
  * says nothing the operator can act on.
  */
-public class ServerStartupError extends Exception {
+public class ServerStartupException extends Exception {
     private static final long serialVersionUID = 1L;
 
-    public ServerStartupError(String message) {
+    public ServerStartupException(String message) {
         super(message);
     }
 
-    public ServerStartupError(String message, Throwable cause) {
+    public ServerStartupException(String message, Throwable cause) {
         super(message, cause);
     }
 }

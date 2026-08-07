@@ -2,8 +2,13 @@ package io.github.rdfc;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -22,6 +27,9 @@ import rdfc.Service.LogMessage;
  * custom levels, and the protobuf setter then threw an NPE from inside logging.
  */
 class GrpcLogHandlerTest {
+    /** What the handler says on stderr when a live log stream dies. */
+    private static final String FAILURE_LINE = "The log stream to the orchestrator failed";
+
     /** The levels the orchestrator (winston) accepts. */
     private static final Set<String> WINSTON_LEVELS = Set.of("error", "warn", "info", "http", "verbose", "debug",
             "silly");
@@ -148,5 +156,51 @@ class GrpcLogHandlerTest {
 
         handler.publish(new LogRecord(Level.SEVERE, "boom"));
         assertEquals(0, stream.sent.size(), "kept sending on a log stream that is gone");
+    }
+
+    /**
+     * A stream that fails on a handler that is still open is a fault, and the
+     * operator gets told on stderr.
+     */
+    @Test
+    void aStreamThatFailsWhileOpenIsReportedOnStderr() {
+        var handler = new GrpcLogHandler(new CapturingStream(), "http://example.org/runner");
+
+        var printed = whileCapturingStderr(() -> handler.onError(new IllegalStateException("UNAVAILABLE")));
+
+        assertTrue(printed.contains(FAILURE_LINE), "a live log stream failed without a word: " + printed);
+        assertTrue(printed.contains("UNAVAILABLE"), "the failure was reported without saying what it was");
+    }
+
+    /**
+     * The teardown half-closes the log stream and then drops the channel, and gRPC
+     * answers that with an onError carrying UNAVAILABLE — once per handler. That is
+     * the shutdown finishing, not a fault, and it used to print a wall of failure
+     * lines after every clean run.
+     */
+    @Test
+    void aStreamThatFailsAfterAnIntentionalCloseIsQuiet() {
+        var handler = new GrpcLogHandler(new CapturingStream(), "http://example.org/runner");
+        handler.close();
+
+        var printed = whileCapturingStderr(() -> handler.onError(new IllegalStateException("UNAVAILABLE")));
+
+        assertFalse(printed.contains(FAILURE_LINE), "a closed log stream still complained on stderr: " + printed);
+    }
+
+    /** Runs the action with stderr redirected, and hands back what it wrote. */
+    private static String whileCapturingStderr(Runnable action) {
+        var original = System.err;
+        var captured = new ByteArrayOutputStream();
+        try {
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8.name()));
+            action.run();
+            System.err.flush();
+        } catch (UnsupportedEncodingException e) {
+            throw new AssertionError("UTF-8 is not optional", e);
+        } finally {
+            System.setErr(original);
+        }
+        return captured.toString(StandardCharsets.UTF_8);
     }
 }

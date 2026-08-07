@@ -199,9 +199,9 @@ public final class RunnerServer implements Closeable {
      * returns. The two hold the same lock, so they cannot interleave into a
      * server that has reported it stopped and then opens a port.
      *
-     * @throws ServerStartupError when either port cannot be bound
+     * @throws ServerStartupException when either port cannot be bound
      */
-    public void start() throws ServerStartupError {
+    public void start() throws ServerStartupException {
         if (!this.started.compareAndSet(false, true)) {
             throw new IllegalStateException("this server was already started");
         }
@@ -930,7 +930,7 @@ public final class RunnerServer implements Closeable {
      * @param property the configuration property naming that port
      * @return the error to report and exit on
      */
-    private static ServerStartupError bindError(IOException cause, String purpose, int port, String property) {
+    private static ServerStartupException bindError(IOException cause, String purpose, int port, String property) {
         String detail;
         if (cause instanceof BindException) {
             detail = "port " + port + " is already in use — another JVM runner server (or a different process) "
@@ -939,7 +939,7 @@ public final class RunnerServer implements Closeable {
         } else {
             detail = "could not bind port " + port + ": " + cause;
         }
-        return new ServerStartupError("Cannot start the " + purpose + " listener: " + detail, cause);
+        return new ServerStartupException("Cannot start the " + purpose + " listener: " + detail, cause);
     }
 
     /**

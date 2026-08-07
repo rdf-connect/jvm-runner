@@ -127,9 +127,23 @@ public final class RunnerServer implements Closeable {
     private final AtomicBoolean stopping = new AtomicBoolean();
     private final CountDownLatch stopped = new CountDownLatch(1);
 
-    private ServerSocket listener;
-    private HttpServer http;
-    private Thread accepter;
+    /**
+     * Held while the listeners are being opened, and while they are being closed
+     * again.
+     *
+     * The entrypoint installs its signal hook <em>before</em> it starts this
+     * server — a signal arriving in between would otherwise find no hook at all —
+     * so a shutdown genuinely can begin on another thread while {@link #start()}
+     * is halfway through binding. Without this the two interleave into a server
+     * that reports it has stopped and then opens a listener.
+     */
+    private final Object lifecycle = new Object();
+
+    // Written under the lifecycle lock, read from the accept loop, the request
+    // threads and whoever asks which ports were bound
+    private volatile ServerSocket listener;
+    private volatile HttpServer http;
+    private volatile Thread accepter;
 
     /**
      * Reads a configuration and prepares everything that does not need a port.
@@ -177,7 +191,13 @@ public final class RunnerServer implements Closeable {
      * Opens both listeners and starts serving.
      *
      * The gRPC listener goes first and is rolled back when the HTTP one cannot be
-     * opened, so a start that fails leaves no port bound behind it.
+     * opened, so a start that fails leaves no port bound behind it — and neither
+     * of them is published on this object until both are open, so a failed start
+     * leaves nothing for a shutdown to find either.
+     *
+     * A {@link #shutdown()} that got in first wins: this binds nothing and
+     * returns. The two hold the same lock, so they cannot interleave into a
+     * server that has reported it stopped and then opens a port.
      *
      * @throws ServerStartupError when either port cannot be bound
      */
@@ -186,39 +206,74 @@ public final class RunnerServer implements Closeable {
             throw new IllegalStateException("this server was already started");
         }
 
-        try {
-            // 0.0.0.0: the orchestrator is on another machine, or in another
-            // container, which is the entire point of this mode
-            this.listener = new ServerSocket();
-            this.listener.setReuseAddress(true);
-            this.listener.bind(new InetSocketAddress(this.grpcBindPort));
-        } catch (IOException e) {
-            throw bindError(e, "gRPC", this.grpcBindPort, "grpcPort");
+        synchronized (this.lifecycle) {
+            if (this.stopping.get()) {
+                // A signal beat us to it, between the entrypoint installing its
+                // hook and this call. Nothing is bound, so there is nothing to
+                // undo; the shutdown has already completed and awaitShutdown
+                // returns at once.
+                LOGGER.info("Not starting: this server was stopped before it came up");
+                return;
+            }
+
+            ServerSocket grpc;
+            try {
+                // 0.0.0.0: the orchestrator is on another machine, or in another
+                // container, which is the entire point of this mode
+                grpc = new ServerSocket();
+                grpc.setReuseAddress(true);
+                grpc.bind(new InetSocketAddress(this.grpcBindPort));
+            } catch (IOException e) {
+                throw bindError(e, "gRPC", this.grpcBindPort, "grpcPort");
+            }
+
+            HttpServer web;
+            try {
+                web = HttpServer.create(new InetSocketAddress(this.httpBindPort), 0);
+            } catch (IOException e) {
+                // The gRPC listener is already open; roll it back so a failed
+                // start leaks neither a port nor a thread
+                closeQuietly(grpc, "gRPC listener");
+                throw bindError(e, "HTTP", this.httpBindPort, "httpPort");
+            }
+
+            // One context and one handler: the JDK server routes by longest
+            // prefix, so separate contexts would make /health also answer
+            // /health/anything, and the paths this serves are exact.
+            web.createContext("/", this::handle);
+            web.setExecutor(this.requests);
+
+            // Published only now that both are open: until this point a
+            // concurrent shutdown has nothing to close, and nothing to report
+            // having closed
+            this.listener = grpc;
+            this.http = web;
+
+            web.start();
+
+            Thread accepting = new Thread(this::acceptLoop, "rdfc-accept");
+            accepting.setDaemon(true);
+            this.accepter = accepting;
+            accepting.start();
+
+            LOGGER.info("JVM runner server listening: http://0.0.0.0:" + this.boundHttpPort() + " (" + ROUTES
+                    + "), gRPC TCP on port " + this.boundGrpcPort());
+            LOGGER.info("Serving " + this.whitelist.size() + " whitelisted file(s) relative to " + this.serveRoot);
         }
+    }
 
-        try {
-            this.http = HttpServer.create(new InetSocketAddress(this.httpBindPort), 0);
-        } catch (IOException e) {
-            // The gRPC listener is already open; roll it back so a failed start
-            // leaks neither a port nor a thread
-            closeQuietly(this.listener, "gRPC listener");
-            throw bindError(e, "HTTP", this.httpBindPort, "httpPort");
-        }
-
-        // One context and one handler: the JDK server routes by longest prefix, so
-        // separate contexts would make /health also answer /health/anything, and
-        // the paths this serves are exact.
-        this.http.createContext("/", this::handle);
-        this.http.setExecutor(this.requests);
-        this.http.start();
-
-        this.accepter = new Thread(this::acceptLoop, "rdfc-accept");
-        this.accepter.setDaemon(true);
-        this.accepter.start();
-
-        LOGGER.info("JVM runner server listening: http://0.0.0.0:" + this.boundHttpPort() + " (" + ROUTES
-                + "), gRPC TCP on port " + this.boundGrpcPort());
-        LOGGER.info("Serving " + this.whitelist.size() + " whitelisted file(s) relative to " + this.serveRoot);
+    /**
+     * Whether this server has ports open right now.
+     *
+     * For an entrypoint that has to decide whether a stop is worth announcing: a
+     * server that never came up, or that has already been stopped, is not
+     * something anybody needs to be told is stopping.
+     *
+     * @return true between a successful {@link #start()} and a
+     *         {@link #shutdown()}
+     */
+    public boolean isServing() {
+        return this.listener != null && !this.stopping.get();
     }
 
     /**
@@ -704,8 +759,17 @@ public final class RunnerServer implements Closeable {
      * Idempotent, and a second caller waits for the first one's shutdown rather
      * than returning into a half-stopped server — the runtime hook and a
      * {@code shutdown()} in a test can easily arrive together.
+     *
+     * Safe before, during and after {@link #start()}. It takes the same lock, so
+     * a shutdown that arrives while the listeners are being opened either runs
+     * first — and then that start binds nothing — or runs after it and closes
+     * what it opened. What cannot happen is the two interleaving into a stopped
+     * server with a live port.
      */
     public void shutdown() {
+        // Outside the lock: the first caller holds it for as long as the whole
+        // shutdown takes, and a second caller waiting on the latch may not be
+        // waiting for the lock as well
         if (!this.stopping.compareAndSet(false, true)) {
             try {
                 this.stopped.await(SHUTDOWN_GRACE_MILLIS, TimeUnit.MILLISECONDS);
@@ -715,6 +779,26 @@ public final class RunnerServer implements Closeable {
             return;
         }
 
+        try {
+            synchronized (this.lifecycle) {
+                this.stop();
+            }
+        } finally {
+            // In a finally: everyone waiting on this — the entrypoint's main
+            // thread, a second caller — is stuck forever if a step above threw
+            this.stopped.countDown();
+            LOGGER.info("Stopped");
+        }
+    }
+
+    /**
+     * The shutdown itself, with the lifecycle lock held.
+     *
+     * Every field it touches may be null: a server that was stopped before it
+     * ever came up has nothing bound, and that is a perfectly ordinary way for a
+     * process that got a signal during its startup to end.
+     */
+    private void stop() {
         LOGGER.info("Shutting down...");
         long deadline = System.currentTimeMillis() + SHUTDOWN_GRACE_MILLIS;
 
@@ -733,9 +817,6 @@ public final class RunnerServer implements Closeable {
         this.connections.shutdownNow();
         this.requests.shutdownNow();
         await(this.connections, deadline);
-
-        this.stopped.countDown();
-        LOGGER.info("Stopped");
     }
 
     /** {@link #shutdown()} under another name, so this fits a try-with-resources. */

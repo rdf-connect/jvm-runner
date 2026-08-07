@@ -62,12 +62,19 @@ public final class RdfcServer {
         // JVM finish exiting, so the shutdown has to happen inside it rather than
         // only unblocking the main thread.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            // Straight to stderr, and not through the logger: the JDK's own
-            // shutdown hook resets every log handler, it runs concurrently with
-            // this one, and it usually wins — so a stop that is only logged is a
-            // stop that is regularly invisible. The lines inside shutdown() stay
-            // for everyone who calls it while the process is still alive.
-            System.err.println("Stopping the JVM runner server...");
+            if (server.isServing()) {
+                // Straight to stderr, and not through the logger: the JDK's own
+                // shutdown hook resets every log handler, it runs concurrently
+                // with this one, and it usually wins — so a stop that is only
+                // logged is a stop that is regularly invisible. The lines inside
+                // shutdown() stay for everyone who calls it while the process is
+                // still alive.
+                //
+                // Only when there is something to stop: this hook also runs on
+                // the System.exit below, where a port that could not be bound is
+                // the story and "stopping" is noise on top of it.
+                System.err.println("Stopping the JVM runner server...");
+            }
             server.shutdown();
         }, "rdfc-server-shutdown"));
 

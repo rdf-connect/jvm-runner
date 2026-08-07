@@ -1,0 +1,20 @@
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+# Relative jar, see the note in send.ttl.
+rdfc:JvmLogProcessor rdfc:javaImplementationOf rdfc:Processor;
+  rdfs:label "Log processor";
+  rdfs:comment "Logs every incoming message";
+  rdfc:jar <../test-processor.jar>;
+  rdfc:class "rdfc.test.LogProcessor".
+
+[ ] a sh:NodeShape;
+  sh:targetClass rdfc:JvmLogProcessor;
+  sh:property [
+    sh:path rdfc:reader;
+    sh:name "reader";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:class rdfc:Reader;
+  ].

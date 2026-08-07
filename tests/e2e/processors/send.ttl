@@ -1,0 +1,29 @@
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+# The jar is relative on purpose: the orchestrator resolves it against the URL it
+# read this file from, so it becomes <http://localhost:3000/test-processor.jar> —
+# a file this very server serves, which the runner then loads off its own disk
+# rather than downloading (see ServedJars). run-e2e.sh copies it there.
+rdfc:JvmSendProcessor rdfc:javaImplementationOf rdfc:Processor;
+  rdfs:label "Send processor";
+  rdfs:comment "Sends the configured string messages to a writer";
+  rdfc:jar <../test-processor.jar>;
+  rdfc:class "rdfc.test.SendProcessor".
+
+[ ] a sh:NodeShape;
+  sh:targetClass rdfc:JvmSendProcessor;
+  sh:property [
+    sh:path rdfc:writer;
+    sh:name "writer";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:class rdfc:Writer;
+  ], [
+    sh:path rdfc:msg;
+    sh:name "msg";
+    sh:minCount 1;
+    sh:datatype xsd:string;
+  ].

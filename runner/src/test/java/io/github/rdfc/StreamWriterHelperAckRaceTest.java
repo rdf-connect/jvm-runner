@@ -33,10 +33,11 @@ class StreamWriterHelperAckRaceTest {
         var orchestrator = new FakeOrchestrator();
         var controls = new AtomicInteger();
 
-        // Answer every outgoing chunk from inside the send itself
+        // Answer every outgoing chunk from inside the send itself, so the control
+        // lands before chunk() returns
         orchestrator.whileSending(RunnerGrpc.getSendStreamMessageMethod(), (StreamChunk chunk) -> {
             var control = ReceivingStreamControl.newBuilder().setStreamSequenceNumber(controls.getAndIncrement());
-            orchestrator.respond(RunnerGrpc.getSendStreamMessageMethod(), control.build());
+            orchestrator.respondOnThisThread(RunnerGrpc.getSendStreamMessageMethod(), control.build());
         });
 
         var acknowledged = new CompletableFuture<Void>();
@@ -61,8 +62,9 @@ class StreamWriterHelperAckRaceTest {
     @Test
     void closeCompletesOnTheAcknowledgement() throws Exception {
         var orchestrator = new FakeOrchestrator();
+        // From the delivery thread, the way a real transport answers
         orchestrator.whileSending(RunnerGrpc.getSendStreamMessageMethod(), (StreamChunk chunk) -> {
-            orchestrator.respond(RunnerGrpc.getSendStreamMessageMethod(),
+            orchestrator.respondLater(RunnerGrpc.getSendStreamMessageMethod(),
                     ReceivingStreamControl.newBuilder().build());
         });
 

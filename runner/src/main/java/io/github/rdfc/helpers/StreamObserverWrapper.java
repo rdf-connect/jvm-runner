@@ -17,8 +17,24 @@ import io.grpc.stub.StreamObserver;
  * and from the gRPC callback threads, so every outgoing observer is wrapped in
  * one of these and all three methods are synchronized on this wrapper.
  *
- * The lock is a leaf: nothing is called while holding it except the wrapped
- * observer itself, so it cannot take part in a lock cycle.
+ * The lock is a leaf, but only under an <em>asynchronous</em> transport: nothing
+ * is called while holding it except the wrapped observer, and the assumption is
+ * that handing a message to the transport never delivers an incoming message on
+ * that same thread. That holds for the Netty transport this runner uses, where
+ * inbound messages arrive on the channel's event loop.
+ *
+ * It does <em>not</em> hold for a transport with a direct executor, which can
+ * deliver a response from inside the send. Two threads sending on two different
+ * streams could then each be waiting for the other's lock:
+ *
+ * <pre>
+ * A: holds L(connect)   -&gt; ack delivered inline -&gt; continuation sends a stream chunk -&gt; wants L(stream)
+ * B: holds L(stream)    -&gt; control delivered inline -&gt; continuation sends a message  -&gt; wants L(connect)
+ * </pre>
+ *
+ * So do not configure a direct executor on the channel. Delivering responses on
+ * the sending thread is something only the tests do, and only on a single
+ * stream, where the lock is simply re-entered.
  */
 public class StreamObserverWrapper<T> implements StreamObserver<T> {
 

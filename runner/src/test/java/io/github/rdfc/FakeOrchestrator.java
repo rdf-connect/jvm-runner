@@ -5,6 +5,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 import io.grpc.CallOptions;
@@ -31,6 +37,15 @@ class FakeOrchestrator extends Channel {
     private final Map<String, List<Object>> sent = new ConcurrentHashMap<>();
     /** Hooks run from inside sendMessage, per full method name. */
     private final Map<String, Consumer<Object>> hooks = new ConcurrentHashMap<>();
+    /**
+     * Incoming messages are delivered here and never on a sending thread, the way
+     * a real transport does it.
+     */
+    private final ExecutorService delivery = Executors.newSingleThreadExecutor(runnable -> {
+        var thread = new Thread(runnable, "fake-orchestrator-delivery");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     static RunnerGrpc.RunnerStub stub(FakeOrchestrator orchestrator) {
         return RunnerGrpc.newStub(orchestrator);
@@ -82,7 +97,57 @@ class FakeOrchestrator extends Channel {
     }
 
     /**
-     * Delivers a response to the runner, the way the gRPC machinery would.
+     * Delivers a response to the runner on the delivery thread and waits for it to
+     * be handled.
+     *
+     * This is how a real transport behaves: incoming messages arrive on the
+     * transport's own thread, never on the thread that is sending. Use this from
+     * the test thread, outside of a {@link #whileSending} hook.
+     *
+     * @param <ReqT>   request type of the method
+     * @param <RespT>  response type of the method
+     * @param method   the method to answer on
+     * @param response the message the runner receives
+     */
+    <ReqT, RespT> void respond(MethodDescriptor<ReqT, RespT> method, RespT response) {
+        var delivered = this.respondLater(method, response);
+        try {
+            delivered.get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("delivering on " + method.getFullMethodName() + " failed", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("delivering on " + method.getFullMethodName() + " timed out", e);
+        }
+    }
+
+    /**
+     * Hands the response to the delivery thread and returns right away.
+     *
+     * This is what a {@link #whileSending} hook has to use: the hook runs while the
+     * runner holds the lock serializing that stream, so it may not block waiting
+     * for a delivery that might want the very same lock.
+     *
+     * @param <ReqT>   request type of the method
+     * @param <RespT>  response type of the method
+     * @param method   the method to answer on
+     * @param response the message the runner receives
+     * @return completes once the runner handled the response
+     */
+    <ReqT, RespT> Future<?> respondLater(MethodDescriptor<ReqT, RespT> method, RespT response) {
+        return this.delivery.submit(() -> this.respondOnThisThread(method, response));
+    }
+
+    /**
+     * Delivers a response on the calling thread, so from inside a
+     * {@link #whileSending} hook it lands before the send even returned.
+     *
+     * That is what a transport with a direct executor would do. No real transport
+     * this runner uses behaves like this — it exists to pin down the
+     * acknowledgement races, where the fix is exactly that the runner has to be
+     * ready for the answer before it sends.
      *
      * @param <ReqT>   request type of the method
      * @param <RespT>  response type of the method
@@ -90,7 +155,7 @@ class FakeOrchestrator extends Channel {
      * @param response the message the runner receives
      */
     @SuppressWarnings("unchecked")
-    <ReqT, RespT> void respond(MethodDescriptor<ReqT, RespT> method, RespT response) {
+    <ReqT, RespT> void respondOnThisThread(MethodDescriptor<ReqT, RespT> method, RespT response) {
         var call = (FakeCall<ReqT, RespT>) this.calls.get(method.getFullMethodName());
         if (call == null) {
             throw new IllegalStateException("no call was made on " + method.getFullMethodName());

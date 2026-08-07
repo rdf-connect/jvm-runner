@@ -51,9 +51,12 @@ public class Runner implements StreamObserver<ToRunner> {
     protected final Map<String, Processor<?>> processors = new ConcurrentHashMap<>();
 
     /**
-     * Per processor the future that completes when its init() finished (and its
-     * transform() was started). A processor may only produce once this completed,
-     * see the `start` message.
+     * Per processor the future that completes when its init() finished and its
+     * transform() was started, and that fails when it never got that far. A
+     * processor may only produce once this completed, see the `start` message.
+     *
+     * The entry is put in before init() is even called, so a `start` message that
+     * comes back while init is still running always finds the processor.
      */
     private final Map<String, CompletableFuture<Void>> initialized = new ConcurrentHashMap<>();
 
@@ -107,8 +110,22 @@ public class Runner implements StreamObserver<ToRunner> {
      * runner down.
      */
     private void decreaseAndCheckEnd() {
-        // decrementAndGet, so exactly one caller can ever observe the zero
-        var v = this.awaiting.decrementAndGet();
+        this.decreaseAndCheckEnd(1);
+    }
+
+    /**
+     * Hands a number of processor callbacks back and shuts this runner down when
+     * none are left.
+     *
+     * Every path that lowers the counter goes through here: a path that lowers it
+     * without checking can drop it onto zero without anyone noticing, and then the
+     * runner waits forever for a callback that will never come.
+     *
+     * @param callbacks how many callbacks are handed back at once
+     */
+    private void decreaseAndCheckEnd(int callbacks) {
+        // One atomic step, so exactly one caller can ever observe the zero
+        var v = this.awaiting.addAndGet(-callbacks);
         if (v == 0) {
             this.stream.onCompleted();
             this.onComplete.run();
@@ -215,51 +232,7 @@ public class Runner implements StreamObserver<ToRunner> {
         }
 
         if (value.hasProc()) {
-            var proc = value.getProc();
-            var uri = proc.getUri();
-
-            var procLogger = GrpcLogHandler.createLogger(stub, uri, this.uri);
-
-            // Claim both units up front, before init even starts: a `start` message can
-            // arrive while init is still pending, and if the counter were still zero
-            // by then the produce of an earlier processor could drop it below zero and
-            // this runner would never terminate.
-            // One is decreased when the transform is finished,
-            // one is decreased when the produce is finished.
-            this.awaiting.addAndGet(2);
-
-            try {
-                Processor<?> processor = this.startProc(proc, procLogger);
-                var init = processor.init().thenAccept(_void -> {
-                    processor.transform().whenComplete((output, e) -> {
-                        if (e != null) {
-                            this.logger.severe("Processor " + uri + " transform exception: " + e);
-                            e.printStackTrace(System.err);
-                        }
-                        this.decreaseAndCheckEnd();
-                    });
-                    // This processor is initialized: init is awaited and transform is started
-                    this.sendProcInit(uri, Optional.empty());
-                });
-
-                // Registered before returning, so the `start` message that the
-                // orchestrator sends after this one always finds it.
-                this.initialized.put(uri, init);
-
-                init.exceptionally(e -> {
-                    e.printStackTrace();
-                    // Neither transform nor produce will run for this processor, hand both
-                    // units back. Deliberately without checking for the end: a processor
-                    // that failed to initialize is the orchestrator's problem.
-                    this.awaiting.addAndGet(-2);
-                    this.sendProcInit(uri, Optional.of(e.toString()));
-                    return null;
-                });
-            } catch (Exception e) {
-                e.printStackTrace();
-                this.awaiting.addAndGet(-2);
-                this.sendProcInit(uri, Optional.of(e.toString()));
-            }
+            this.startProcessor(value.getProc());
 
             return;
         }
@@ -288,6 +261,89 @@ public class Runner implements StreamObserver<ToRunner> {
         }
         var orchestratorMessage = FromRunner.newBuilder().setProcessed(processed.build());
         this.stream.onNext(orchestratorMessage.build());
+    }
+
+    /**
+     * Constructs a processor and initializes it.
+     *
+     * The processor claims two callbacks (a transform and a produce) before its
+     * init is even started, so a `start` message arriving while init is still
+     * pending cannot drop the counter past zero.
+     *
+     * @param proc the processor the orchestrator sent
+     */
+    private void startProcessor(rdfc.Service.Processor proc) {
+        var uri = proc.getUri();
+        var procLogger = GrpcLogHandler.createLogger(this.stub, uri, this.uri);
+
+        // One is decreased when the transform is finished,
+        // one is decreased when the produce is finished.
+        this.awaiting.addAndGet(2);
+
+        // The future the `start` message chains the produce on. It exists before
+        // init() is called, because init can complete on this very thread and the
+        // ProcessorInitialized that its continuation sends can bring the `start`
+        // straight back in: by then the `start` handler has to find this processor.
+        var initialized = new CompletableFuture<Void>();
+
+        try {
+            Processor<?> processor = this.startProc(proc, procLogger);
+            this.initialized.put(uri, initialized);
+
+            processor.init().thenAccept(_void -> {
+                // Reported before transform is started: from the moment transform runs
+                // its completion decreases the counter, so a failure after that point
+                // may no longer hand the two callbacks back.
+                this.sendProcInit(uri, Optional.empty());
+
+                processor.transform().whenComplete((output, e) -> {
+                    if (e != null) {
+                        this.logger.severe("Processor " + uri + " transform exception: " + e);
+                        e.printStackTrace(System.err);
+                    }
+                    this.decreaseAndCheckEnd();
+                });
+            }).whenComplete((_void, e) -> {
+                if (e == null) {
+                    // Init is awaited and transform is started, this processor may produce
+                    initialized.complete(null);
+                    return;
+                }
+
+                e.printStackTrace();
+                this.failedToInitialize(uri, initialized, e);
+            });
+        } catch (Exception e) {
+            e.printStackTrace();
+            this.failedToInitialize(uri, initialized, e);
+        }
+    }
+
+    /**
+     * A processor never made it past its init: report it and hand its two
+     * callbacks back.
+     *
+     * @param uri         of the processor
+     * @param initialized the future the `start` message chains its produce on
+     * @param error       what went wrong
+     */
+    private void failedToInitialize(String uri, CompletableFuture<Void> initialized, Throwable error) {
+        // Neither transform nor produce runs for this processor, so the `start`
+        // message may not chain a produce on it either
+        initialized.completeExceptionally(error);
+
+        try {
+            // Reported before the callbacks are handed back: that hand-back can be
+            // what ends this runner, and then the stream is completed and nothing can
+            // be sent on it anymore.
+            this.sendProcInit(uri, Optional.of(error.toString()));
+        } catch (Exception e) {
+            this.logger.severe("Could not report the failed init of " + uri + ": " + e);
+        } finally {
+            // In a finally: a counter that is never handed back keeps this runner
+            // alive forever.
+            this.decreaseAndCheckEnd(2);
+        }
     }
 
     /**

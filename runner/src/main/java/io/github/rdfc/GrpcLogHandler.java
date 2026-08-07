@@ -2,6 +2,7 @@ package io.github.rdfc;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -107,10 +108,24 @@ public class GrpcLogHandler extends Handler
     }
 
     /**
-     * Set once the log stream failed: there is nothing to send on anymore, and
-     * every attempt would raise another failure to log.
+     * Set once the log stream is gone: it failed, the orchestrator closed it, or
+     * this handler was closed. There is nothing to send on anymore, and every
+     * attempt would raise another failure to log.
      */
     private volatile boolean broken = false;
+
+    /** Whether {@link #close()} already ran. Closing twice half-closes twice. */
+    private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    /**
+     * The URI of whoever logs through this handler — the runner or one of its
+     * processors. Visible for testing and for the teardown's log lines.
+     *
+     * @return the URI this handler was built for
+     */
+    String uri() {
+        return this.uri;
+    }
 
     @Override
     public void publish(LogRecord record) {
@@ -144,10 +159,49 @@ public class GrpcLogHandler extends Handler
         // nothing to do
     }
 
+    /**
+     * Ends the log stream this handler ships on.
+     *
+     * Called from the runner's teardown, once per handler it built: a connection
+     * that comes and goes in server mode would otherwise leave one open log RPC
+     * behind per processor, forever.
+     *
+     * Idempotent, and it never throws. Half-closing a call twice, or a call whose
+     * channel is already gone, raises — and this runs inside a teardown that may
+     * not be stopped by it. Afterwards {@link #publish} is a no-op: whoever still
+     * holds this logger keeps logging to the console through the root handler.
+     */
     @Override
     public void close() {
-        // close channel if needed
-        this.stream.onCompleted();
+        if (!this.closed.compareAndSet(false, true)) {
+            return;
+        }
+
+        // Read before it is set: a stream the orchestrator already ended is
+        // closed on its side too, and half-closing it again only throws
+        var gone = this.broken;
+        this.broken = true;
+
+        if (gone) {
+            return;
+        }
+
+        try {
+            this.stream.onCompleted();
+        } catch (Exception e) {
+            // Not through a Logger: this handler is where logging ends up, so that
+            // would come straight back in here
+            System.err.println("Completing the log stream to the orchestrator failed: " + e);
+        }
+    }
+
+    /**
+     * Whether this handler was closed. Visible for testing.
+     *
+     * @return true once {@link #close()} ran
+     */
+    boolean isClosed() {
+        return this.closed.get();
     }
 
     // This is only a sending stream, we don't expect incoming messages.
@@ -176,12 +230,46 @@ public class GrpcLogHandler extends Handler
         this.broken = true;
     }
 
-    public static Logger createLogger(RunnerGrpc.RunnerStub stub, String uri, String... entities) {
-        var logger = Logger.getLogger(uri);
-        for (Handler h : logger.getHandlers()) {
-            logger.removeHandler(h);
-        }
-        logger.addHandler(new GrpcLogHandler(stub, uri, entities));
+    /**
+     * Builds the logger that ships its records to the orchestrator through this
+     * handler.
+     *
+     * <b>Anonymous</b>, and that is the point: {@code Logger.getLogger(uri)} looks
+     * the logger up in the JVM-wide {@link java.util.logging.LogManager}, so two
+     * server connections running the same runner URI at the same time would share
+     * one logger, pile their handlers onto it and each ship the other's records.
+     * An anonymous logger belongs to whoever holds it.
+     *
+     * That does mean the LogManager holds no reference to it: an anonymous logger
+     * lives exactly as long as somebody keeps it. The runner does — see
+     * {@code Runner.loggers} — and so does every processor, in
+     * {@code Processor.logger}.
+     *
+     * Its parent is the root logger and parent handlers stay on, so everything
+     * logged here also reaches the console handler {@link Logging} installed. The
+     * level is ALL because the filtering belongs at the handlers: the console one
+     * has the level {@code LOG_LEVEL} asked for, and the orchestrator does its own
+     * filtering on what this handler ships.
+     *
+     * An anonymous logger has no name, so the record would reach the console
+     * without saying who logged it. The filter stamps the URI on, before any
+     * handler — this one or the root's — ever sees the record.
+     *
+     * @param handler ships the records to the orchestrator
+     * @param uri     of whoever logs through it
+     * @return the logger, held by nothing but the caller
+     */
+    static Logger loggerFor(GrpcLogHandler handler, String uri) {
+        var logger = Logger.getAnonymousLogger();
+        logger.setLevel(Level.ALL);
+        logger.setUseParentHandlers(true);
+        logger.setFilter(record -> {
+            if (record.getLoggerName() == null) {
+                record.setLoggerName(uri);
+            }
+            return true;
+        });
+        logger.addHandler(handler);
         return logger;
     }
 }

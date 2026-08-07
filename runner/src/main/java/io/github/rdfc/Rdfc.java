@@ -11,6 +11,10 @@ public class Rdfc {
     static final String USAGE = "Usage: java -jar runner-all.jar <orchestrator-host:port> <runner-uri>";
 
     public static void main(String[] args) throws Exception {
+        // First, so even the usage complaint below could be logged, and so
+        // whatever a processor logs during its init lands on the console
+        Logging.init();
+
         if (args.length != 2) {
             System.err.println(USAGE);
             System.exit(2);

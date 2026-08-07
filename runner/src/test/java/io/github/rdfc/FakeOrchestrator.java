@@ -11,6 +11,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import io.grpc.CallOptions;
@@ -38,6 +39,13 @@ class FakeOrchestrator extends Channel {
     private final Map<String, List<Object>> sent = new ConcurrentHashMap<>();
     /** Hooks run from inside sendMessage, per full method name. */
     private final Map<String, Consumer<Object>> hooks = new ConcurrentHashMap<>();
+    /**
+     * How often the runner half-closed a call on a method, i.e. how many of the
+     * calls it opened there it said goodbye on. Counted over every call on the
+     * method, not just the most recent one: a runner opens a log stream per
+     * processor and all of them have to be closed again.
+     */
+    private final Map<String, AtomicInteger> halfClosed = new ConcurrentHashMap<>();
     /**
      * Incoming messages are delivered here and never on a sending thread, the way
      * a real transport does it.
@@ -81,6 +89,18 @@ class FakeOrchestrator extends Channel {
         synchronized (messages) {
             return (List<ReqT>) new ArrayList<>(messages);
         }
+    }
+
+    /**
+     * How often the runner said goodbye on this method — one per call it opened
+     * there and closed again.
+     *
+     * @param method the method to look at
+     * @return the number of half-closes
+     */
+    int goodbyesOn(MethodDescriptor<?, ?> method) {
+        var count = this.halfClosed.get(method.getFullMethodName());
+        return count == null ? 0 : count.get();
     }
 
     /**
@@ -268,7 +288,9 @@ class FakeOrchestrator extends Channel {
 
         @Override
         public void halfClose() {
-            // nothing to close
+            FakeOrchestrator.this.halfClosed
+                    .computeIfAbsent(this.method, _key -> new AtomicInteger())
+                    .incrementAndGet();
         }
 
         @Override

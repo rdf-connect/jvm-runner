@@ -8,11 +8,13 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.*;
 import java.util.function.Supplier;
 
@@ -104,6 +106,23 @@ public class Runner implements StreamObserver<ToRunner> {
     private final Logger logger;
 
     /**
+     * Every logger this runner built, with the log stream it ships on.
+     *
+     * Two reasons this list exists. The teardown needs it: each of those loggers
+     * has a log RPC of its own open to the orchestrator, and nothing else knows
+     * they are there — in server mode a connection that comes and goes would
+     * leave one behind per processor. And the loggers are anonymous, so the
+     * LogManager does not hold them: this list is what keeps them alive for as
+     * long as this runner runs, next to the {@code Processor.logger} field of
+     * every processor that got one.
+     *
+     * It is not cleared on teardown. The handlers are detached and closed there,
+     * which is what had to be released; holding the loggers a little longer costs
+     * nothing, and this runner is on its way out anyway.
+     */
+    private final List<LogStream> loggers = new CopyOnWriteArrayList<>();
+
+    /**
      * Completes when this runner is done: normally when every processor finished,
      * exceptionally when the connection to the orchestrator ended before that.
      */
@@ -122,16 +141,10 @@ public class Runner implements StreamObserver<ToRunner> {
     protected final String uri;
 
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete) {
-        var logger = Logger.getLogger("");
-        logger.setLevel(Level.ALL);
-        for (Handler h : logger.getHandlers()) {
-            logger.removeHandler(h);
-        }
-
         this.uri = uri;
         this.onComplete = onComplete;
         this.stub = stub;
-        this.logger = GrpcLogHandler.createLogger(stub, uri, "cli");
+        this.logger = this.createLogger(uri, "cli");
         this.mapper = new ObjectMapper();
         this.mapper.registerModule(new ChannelHandlerModule(this, this.logger));
         // The mapper can ignore properties like `@type`, `@context` from JSON-LD
@@ -149,6 +162,81 @@ public class Runner implements StreamObserver<ToRunner> {
 
         this.sendIdentify();
         this.logger.info("JVM runner identified");
+    }
+
+    /**
+     * A logger of this runner and the log stream its records travel to the
+     * orchestrator on.
+     */
+    static final class LogStream {
+        final Logger logger;
+        final GrpcLogHandler handler;
+
+        LogStream(Logger logger, GrpcLogHandler handler) {
+            this.logger = logger;
+            this.handler = handler;
+        }
+    }
+
+    /**
+     * Builds a logger that reports to the orchestrator, and remembers it.
+     *
+     * Every logger in this runner is made here, so the teardown can find the log
+     * RPC behind each of them again — see {@link #closeLogStreams}. Private: it is
+     * called from the constructor, where an override would run before the
+     * subclass is initialized.
+     *
+     * @param uri      of whoever logs through it, the runner or a processor
+     * @param entities what the orchestrator is told the record belongs to, after
+     *                 the URI itself
+     * @return the logger
+     */
+    private Logger createLogger(String uri, String... entities) {
+        var handler = new GrpcLogHandler(this.stub, uri, entities);
+        var logger = GrpcLogHandler.loggerFor(handler, uri);
+        this.loggers.add(new LogStream(logger, handler));
+
+        if (this.finished.get()) {
+            // Checked after adding, so a processor that arrives while the teardown
+            // is running cannot leave its log stream open: either the teardown
+            // sees the entry and closes it, or this sees the flag. Both closing it
+            // is fine, close() is idempotent.
+            logger.removeHandler(handler);
+            handler.close();
+        }
+
+        return logger;
+    }
+
+    /**
+     * Ends every log stream this runner opened and takes its handler off the
+     * logger it was on.
+     *
+     * One RPC was opened per logger — one for the runner, one per processor — and
+     * before this nothing ever closed them: in server mode every connection that
+     * came and went left them all behind. Whoever still holds one of these loggers
+     * may keep logging afterwards; those records go to the console and no longer
+     * to an orchestrator that is not listening.
+     *
+     * The list is left as it is, so the loggers stay reachable — see
+     * {@link #loggers}.
+     */
+    private void closeLogStreams() {
+        for (var attached : this.loggers) {
+            this.quietly("closing the log stream of " + attached.handler.uri(), () -> {
+                attached.logger.removeHandler(attached.handler);
+                attached.handler.close();
+            });
+        }
+    }
+
+    /**
+     * The loggers this runner built, with their log streams. Visible for testing.
+     *
+     * @return a snapshot of the list
+     */
+    List<LogStream> logStreams() {
+        return List.copyOf(this.loggers);
     }
 
     /**
@@ -237,6 +325,10 @@ public class Runner implements StreamObserver<ToRunner> {
         // an end of stream instead of waiting for data that will never arrive
         this.quietly("closing the readers", () -> this.readers.values().forEach(Reader::close));
         this.quietly("closing the loaded jars", this::closeJars);
+        // Late, so every step above it can still report on the log stream, but
+        // before the callback: in the CLI that shuts the channel down, and a log
+        // stream cannot be half-closed on a channel that is gone
+        this.quietly("closing the log streams", this::closeLogStreams);
         this.quietly("running the completion callback", this.onComplete::run);
 
         if (error != null) {
@@ -414,7 +506,7 @@ public class Runner implements StreamObserver<ToRunner> {
      */
     private void startProcessor(rdfc.Service.Processor proc) {
         var uri = proc.getUri();
-        var procLogger = GrpcLogHandler.createLogger(this.stub, uri, this.uri);
+        var procLogger = this.createLogger(uri, this.uri);
 
         // One is decreased when the transform is finished,
         // one is decreased when the produce is finished.

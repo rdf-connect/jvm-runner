@@ -1,6 +1,7 @@
 package io.github.rdfc.helpers;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.google.protobuf.ByteString;
@@ -71,7 +72,9 @@ public class StreamWriterHelper extends Stream<ByteString>
      */
     @Override
     public void onNext(ReceivingStreamControl value) {
-        this.logger.finest("Receiving message StreamWriterHelper : " + value.getAllFields().keySet().toString());
+        if (this.logger.isLoggable(Level.FINEST)) {
+            this.logger.finest("Receiving message StreamWriterHelper : " + value.getAllFields().keySet().toString());
+        }
         if (!this.nextProcessed.isDone()) {
             this.nextProcessed.complete(null);
         } else {

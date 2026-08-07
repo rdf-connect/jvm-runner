@@ -1,6 +1,7 @@
 
 package io.github.rdfc.helpers;
 
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.google.protobuf.GeneratedMessage.ExtendableMessage;
@@ -28,7 +29,9 @@ public class StreamObserverWrapper<T extends ExtendableMessage<?>> implements St
 
     @Override
     public void onNext(T value) {
-        this.logger.finest("Sending message " + this.tag + ": " + value.getAllFields().keySet().toString());
+        if (this.logger.isLoggable(Level.FINEST)) {
+            this.logger.finest("Sending message " + this.tag + ": " + value.getAllFields().keySet().toString());
+        }
         this.wrapped.onNext(value);
 
     }

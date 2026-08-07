@@ -1,6 +1,7 @@
 package io.github.rdfc.helpers;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.google.protobuf.ByteString;
@@ -48,7 +49,9 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
      */
     @Override
     public void onNext(DataChunk value) {
-        this.logger.finest("Receiving message StreamReaderHelper : " + value.getAllFields().keySet().toString());
+        if (this.logger.isLoggable(Level.FINEST)) {
+            this.logger.finest("Receiving message StreamReaderHelper : " + value.getAllFields().keySet().toString());
+        }
         this.consumingStream.chunk(value.getData());
     }
 

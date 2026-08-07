@@ -19,6 +19,13 @@ public class GrpcLogHandler extends Handler
         implements StreamObserver<Empty> {
     public static final Map<Level, String> LEVEL_TO_STRING;
 
+    /**
+     * Used when a record carries no level at all, or a level that is not covered by
+     * the thresholds below (which should not happen, they cover the full int
+     * range).
+     */
+    static final String DEFAULT_LEVEL = "info";
+
     static {
         Map<Level, String> map = new HashMap<>();
         map.put(Level.SEVERE, "error");
@@ -31,12 +38,65 @@ public class GrpcLogHandler extends Handler
         LEVEL_TO_STRING = Map.copyOf(map); // immutable map
     }
 
+    /**
+     * Translates a java.util.logging Level into one of the log levels the
+     * orchestrator (winston) understands: error, warn, info, http, verbose, debug or
+     * silly.
+     *
+     * Custom levels are not in LEVEL_TO_STRING, so they are mapped by their integer
+     * value instead. The thresholds are picked so that the standard levels keep
+     * mapping exactly as they always did. (`http` has no natural java.util.logging
+     * counterpart, so it is never produced.)
+     *
+     * @param level the level of the record, may be null
+     * @return the matching orchestrator level, never null
+     */
+    static String levelToString(Level level) {
+        if (level == null) {
+            return DEFAULT_LEVEL;
+        }
+
+        var exact = LEVEL_TO_STRING.get(level);
+        if (exact != null) {
+            return exact;
+        }
+
+        var value = level.intValue();
+        if (value >= Level.SEVERE.intValue()) {
+            return "error";
+        }
+        if (value >= Level.WARNING.intValue()) {
+            return "warn";
+        }
+        if (value >= Level.INFO.intValue()) {
+            return "info";
+        }
+        if (value >= Level.FINE.intValue()) {
+            // covers CONFIG as well, which also maps to debug
+            return "debug";
+        }
+        if (value >= Level.FINER.intValue()) {
+            return "verbose";
+        }
+        return "silly";
+    }
+
     private final StreamObserver<LogMessage> stream;
     private final String[] entity;
     private final String uri;
 
     public GrpcLogHandler(RunnerGrpc.RunnerStub stub, String uri, String... entity) {
         this.stream = stub.logStream(this);
+        this.uri = uri;
+        this.entity = entity;
+    }
+
+    /**
+     * Constructor taking the outgoing stream directly, so the message construction
+     * can be exercised without a gRPC connection.
+     */
+    GrpcLogHandler(StreamObserver<LogMessage> stream, String uri, String... entity) {
+        this.stream = stream;
         this.uri = uri;
         this.entity = entity;
     }
@@ -48,7 +108,7 @@ public class GrpcLogHandler extends Handler
         }
 
         var msg = LogMessage.newBuilder()
-                .setLevel(LEVEL_TO_STRING.get(record.getLevel()))
+                .setLevel(levelToString(record.getLevel()))
                 .setMsg(record.getMessage());
 
         msg.addEntities(uri);

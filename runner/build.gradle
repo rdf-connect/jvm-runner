@@ -45,7 +45,7 @@ tasks.register("indexJar", Jar) {
 
 dependencies {
     implementation project(path: ":types")
-	implementation 'com.github.rdf-connect:proto:3df1a1b'
+	implementation 'com.github.rdf-connect:proto:d284bfb'
 
     implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'

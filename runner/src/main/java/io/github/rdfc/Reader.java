@@ -44,7 +44,7 @@ public class Reader implements IReader {
 
     @Override
     public Iter<String> strings() {
-        return this.buffers().transform(ByteString::toString);
+        return this.buffers().transform(ByteString::toStringUtf8);
     }
 
     /**

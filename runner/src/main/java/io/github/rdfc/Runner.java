@@ -104,7 +104,9 @@ public class Runner implements StreamObserver<ToRunner> {
 
     @Override
     public void onNext(ToRunner value) {
-        this.logger.fine("Got message " + value.getAllFields().keySet().toString());
+        if (this.logger.isLoggable(Level.FINE)) {
+            this.logger.fine("Got message " + value.getAllFields().keySet().toString());
+        }
 
         if (value.hasPipeline()) {
             return;
@@ -120,7 +122,8 @@ public class Runner implements StreamObserver<ToRunner> {
                         e.printStackTrace(System.err);
                     }
                     // when the message has been handled, send an acknowledgement
-                    sendProcessed(msg.getChannel(), msg.getGlobalSequenceNumber());
+                    // carrying the failure, if any
+                    sendProcessed(msg.getChannel(), msg.getGlobalSequenceNumber(), e);
                 });
             } else {
                 this.logger.warning("Channel " + msg.getChannel() + " not present.");
@@ -157,7 +160,8 @@ public class Runner implements StreamObserver<ToRunner> {
                         e.printStackTrace(System.err);
                     }
                     // When it is finished, we send an acknowledgement
-                    this.sendProcessed(channel, globalSequenceNumber);
+                    // carrying the failure, if any
+                    this.sendProcessed(channel, globalSequenceNumber, e);
                 });
             } else {
                 this.logger.warning("Channel " + channel + " not present.");
@@ -240,11 +244,18 @@ public class Runner implements StreamObserver<ToRunner> {
      * 
      * @param channel              that carried the message
      * @param globalSequenceNumber identifier of the message (per channel)
+     * @param error                the exception that made handling the message
+     *                             fail, or null when it was handled successfully
      */
-    private void sendProcessed(String channel, int globalSequenceNumber) {
+    private void sendProcessed(String channel, int globalSequenceNumber, Throwable error) {
         var processed = GlobalAck.newBuilder();
         processed.setGlobalSequenceNumber(globalSequenceNumber);
         processed.setChannel(channel);
+        if (error != null) {
+            // Some exceptions carry no message, then fall back on the type name
+            var cause = error.getMessage();
+            processed.setError(cause != null ? cause : error.toString());
+        }
         var orchestratorMessage = FromRunner.newBuilder().setProcessed(processed.build());
         this.stream.onNext(orchestratorMessage.build());
     }

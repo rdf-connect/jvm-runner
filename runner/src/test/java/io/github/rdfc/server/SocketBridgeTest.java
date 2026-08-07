@@ -4,6 +4,7 @@ import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -16,6 +17,10 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
@@ -38,7 +43,8 @@ class SocketBridgeTest {
 
     private static final InetAddress LOOPBACK = InetAddress.getLoopbackAddress();
 
-    private ServerSocket listener;
+    /** The connection this test's bridge serves. */
+    private Connection connection;
 
     /** The orchestrator's end of the connection. */
     private Socket orchestrator;
@@ -51,12 +57,47 @@ class SocketBridgeTest {
     /** Stands in for the gRPC channel dialling the bridge. */
     private Socket grpc;
 
+    /** A real TCP connection, both ends of it. */
+    private static final class Connection implements AutoCloseable {
+        private final ServerSocket listener;
+
+        /** The end the orchestrator writes on. */
+        final Socket client;
+
+        /** The end the runner accepted. */
+        final Socket accepted;
+
+        Connection() throws IOException {
+            this.listener = new ServerSocket(0, 1, LOOPBACK);
+            this.client = new Socket(LOOPBACK, this.listener.getLocalPort());
+            this.client.setSoTimeout(10_000);
+            this.accepted = this.listener.accept();
+        }
+
+        @Override
+        public void close() {
+            closeQuietly(this.client);
+            closeQuietly(this.accepted);
+            closeQuietly(this.listener);
+        }
+    }
+
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Exception ignored) {
+            // in these tests half of them are closed by the bridge itself
+        }
+    }
+
     @BeforeEach
     void connect() throws IOException {
-        this.listener = new ServerSocket(0, 1, LOOPBACK);
-        this.orchestrator = new Socket(LOOPBACK, this.listener.getLocalPort());
-        this.orchestrator.setSoTimeout(10_000);
-        this.accepted = this.listener.accept();
+        this.connection = new Connection();
+        this.orchestrator = this.connection.client;
+        this.accepted = this.connection.accepted;
     }
 
     @AfterEach
@@ -64,16 +105,8 @@ class SocketBridgeTest {
         if (this.bridge != null) {
             this.bridge.close();
         }
-        for (var closeable : new AutoCloseable[] { this.grpc, this.orchestrator, this.accepted, this.listener }) {
-            if (closeable == null) {
-                continue;
-            }
-            try {
-                closeable.close();
-            } catch (Exception ignored) {
-                // several of these are closed by the bridge itself
-            }
-        }
+        closeQuietly(this.grpc);
+        this.connection.close();
     }
 
     /** Puts the bridge up and dials it, as the channel would. */
@@ -134,6 +167,41 @@ class SocketBridgeTest {
                 "the bytes reaching the gRPC side are not the ones the orchestrator sent");
     }
 
+    /** A caller that has no remainder to replay may say so with a null. */
+    @Test
+    void aNullRemainderIsTreatedAsNothingToReplay() throws Exception {
+        bridge(null);
+
+        var sent = sweep(0);
+        send(this.orchestrator, sent);
+
+        assertArrayEquals(sent, receive(this.grpc, sent.length));
+    }
+
+    /** More than one turn through the copy loop, and its buffer is 64 KiB. */
+    @Test
+    void aPayloadLargerThanTheCopyBufferArrivesIntact() throws Exception {
+        bridge(new byte[0]);
+
+        var payload = new byte[200_000];
+        new Random(20260807).nextBytes(payload);
+
+        // From a thread of its own: 200 KB is more than the sockets along the
+        // way will hold, so the writer has to be able to block while this test
+        // drains the other end
+        var writer = new Thread(() -> {
+            try {
+                send(this.orchestrator, payload);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        writer.start();
+
+        assertArrayEquals(payload, receive(this.grpc, payload.length));
+        writer.join();
+    }
+
     /** And the way back is a plain copy. */
     @Test
     void theGrpcSideReachesTheOrchestratorUnchanged() throws Exception {
@@ -188,6 +256,30 @@ class SocketBridgeTest {
     }
 
     /**
+     * The end nothing else reports.
+     *
+     * Both directions half-close, both pumps return normally, no exception is
+     * thrown anywhere — and without the completion count that is a bridge
+     * holding two file descriptors open for a conversation that is over, with
+     * nobody told.
+     */
+    @Test
+    void aCleanEndOnBothSidesTakesTheBridgeDown() throws Exception {
+        bridge(new byte[0]);
+
+        send(this.orchestrator, new byte[] { 42 });
+        assertArrayEquals(new byte[] { 42 }, receive(this.grpc, 1));
+
+        this.orchestrator.shutdownOutput();
+        assertEquals(-1, this.grpc.getInputStream().read());
+        this.grpc.shutdownOutput();
+        assertEquals(-1, this.orchestrator.getInputStream().read());
+
+        this.bridge.done().get(5, TimeUnit.SECONDS);
+        assertTrue(this.accepted.isClosed(), "the orchestrator socket was left open on a finished bridge");
+    }
+
+    /**
      * One connection, ever. Anything else could get itself pumped into an
      * orchestrator's session, and a gRPC reconnect has to fail rather than
      * quietly attach to nothing.
@@ -217,6 +309,88 @@ class SocketBridgeTest {
         assertTrue(elapsed < 3000, "closing an unused bridge took " + elapsed + " ms");
         assertTrue(this.accepted.isClosed(), "the orchestrator socket was left open");
         assertThrows(ConnectException.class, () -> new Socket(LOOPBACK, port), "the listener was left open");
+        assertTrue(this.bridge.done().isDone(), "a closed bridge has to report itself finished");
+    }
+
+    /**
+     * The accept and the close landing at the same moment.
+     *
+     * There are three orderings and the bridge has to survive all of them: the
+     * close gets there first and the connect is refused; the connect is
+     * accepted, pumps and all, and the close takes those down; or — the window
+     * that is a handful of instructions wide — a socket is accepted after
+     * {@code close()} already took its snapshot of what to take down, and the
+     * accept thread has to close it itself.
+     *
+     * Both threads are held at a barrier so the first two are genuinely raced
+     * rather than decided by how long a thread takes to start, and every other
+     * attempt waits for the connection to be up before closing, so the accepted
+     * ordering is covered whichever way the scheduler leans. In all of them: no
+     * hang, both sockets down, the owner told.
+     */
+    @Test
+    void aConnectionRacingTheCloseIsNotLeftBehind() throws Exception {
+        for (var attempt = 0; attempt < 50; attempt++) {
+            try (var connection = new Connection()) {
+                var racer = new SocketBridge(connection.accepted, PREFACE);
+                var port = racer.port();
+
+                var start = new CyclicBarrier(2);
+                var dialled = new CompletableFuture<Socket>();
+                var dialler = new Thread(() -> {
+                    try {
+                        start.await(5, TimeUnit.SECONDS);
+                        dialled.complete(new Socket(LOOPBACK, port));
+                    } catch (IOException refused) {
+                        // The close got there first, which is just as correct
+                        dialled.complete(null);
+                    } catch (Exception e) {
+                        dialled.completeExceptionally(e);
+                    }
+                }, "test-dialler");
+                dialler.start();
+
+                start.await(5, TimeUnit.SECONDS);
+                if (attempt % 2 == 1) {
+                    // Half the attempts do not race at all: the connection is
+                    // definitely up and being pumped before the close begins
+                    dialled.get(5, TimeUnit.SECONDS);
+                }
+                racer.close();
+
+                assertNull(racer.done().get(5, TimeUnit.SECONDS), "attempt " + attempt + " never finished");
+                assertTrue(connection.accepted.isClosed(), "attempt " + attempt + " left the orchestrator socket open");
+
+                var socket = dialled.get(5, TimeUnit.SECONDS);
+                if (socket != null) {
+                    assertDead(socket, "attempt " + attempt + " left a dialled-in socket alive");
+                    socket.close();
+                }
+                dialler.join(5000);
+            }
+        }
+    }
+
+    /**
+     * Asserts a socket is finished: it ends, promptly.
+     *
+     * Not that it is empty — a connection that was accepted before the close
+     * has the remainder the pump already replayed sitting in it, and that is
+     * correct. What may not happen is that it stays open waiting for more.
+     */
+    private static void assertDead(Socket socket, String message) throws IOException {
+        socket.setSoTimeout(2000);
+        var buffer = new byte[4096];
+        try {
+            while (socket.getInputStream().read(buffer) >= 0) {
+                // drain whatever made it through before the close
+            }
+        } catch (SocketTimeoutException e) {
+            fail(message + " (it is still waiting for data)");
+        } catch (IOException reset) {
+            // A connection the OS refused after the fact answers with a reset,
+            // which says the same thing
+        }
     }
 
     @Test
@@ -229,6 +403,7 @@ class SocketBridgeTest {
         assertDoesNotThrow(() -> this.bridge.close());
 
         assertTrue(this.accepted.isClosed());
+        assertTrue(this.bridge.done().isDone());
         assertEquals(-1, readOrEnd(this.grpc), "the gRPC side was left hanging on a closed bridge");
     }
 

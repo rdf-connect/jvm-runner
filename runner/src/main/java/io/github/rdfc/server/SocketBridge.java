@@ -9,6 +9,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -52,11 +53,23 @@ public final class SocketBridge implements Closeable {
     /** Copy buffer, per direction. */
     private static final int BUFFER = 64 * 1024;
 
-    /** How long {@link #close()} lets gRPC finish before it pulls the socket. */
+    /**
+     * How long {@link #close()} lets gRPC finish before it pulls the socket.
+     *
+     * This and {@link #JOIN_MILLIS} add up to the worst case of a single
+     * {@code close()}: 5 s here plus three bounded joins of 1 s (the accept
+     * thread and the two pumps) is <b>8 s</b>. The server's shutdown grace is
+     * 10 s, so one bridge that misbehaves in every way at once still fits
+     * inside it. Change either constant and that arithmetic has to be redone.
+     */
     private static final long SHUTDOWN_SECONDS = 5;
 
-    /** How long {@link #close()} waits for one thread to notice. */
-    private static final long JOIN_MILLIS = 2000;
+    /**
+     * How long {@link #close()} waits for one thread to notice.
+     *
+     * Three of these can be paid in one close. See {@link #SHUTDOWN_SECONDS}.
+     */
+    private static final long JOIN_MILLIS = 1000;
 
     /** Only for thread names, so several bridges can be told apart in a log. */
     private static final AtomicInteger COUNTER = new AtomicInteger();
@@ -67,6 +80,22 @@ public final class SocketBridge implements Closeable {
     private final ServerSocket listener;
     private final int port;
     private final Thread accepter;
+
+    /**
+     * Completed once this bridge carries nothing anymore and both sockets are
+     * closed. See {@link #done()}.
+     */
+    private final CompletableFuture<Void> done = new CompletableFuture<>();
+
+    /**
+     * Pumps that have not exited yet.
+     *
+     * The last one out closes the sockets, which is the only thing that
+     * happens on a connection that ended by itself: both directions
+     * half-closed, both pumps returned normally, and nobody called
+     * {@link #close()}.
+     */
+    private final AtomicInteger running = new AtomicInteger();
 
     /** Everything below is guarded by this, including {@link #closed}. */
     private final Object lock = new Object();
@@ -89,6 +118,12 @@ public final class SocketBridge implements Closeable {
         this.orchestrator = orchestrator;
         this.remainder = remainder == null ? new byte[0] : remainder;
 
+        // A pump blocks in read() for as long as the connection lives, so a
+        // read timeout left over from the handshake would end it. Handshake
+        // puts this back itself; saying so here means the bridge does not
+        // depend on that, and works on any socket it is handed.
+        orchestrator.setSoTimeout(0);
+
         // Backlog 1: one connection is all this will ever serve
         this.listener = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
         this.port = this.listener.getLocalPort();
@@ -103,6 +138,34 @@ public final class SocketBridge implements Closeable {
      */
     public int port() {
         return this.port;
+    }
+
+    /**
+     * Completes when this bridge is carrying nothing anymore.
+     *
+     * A remote connection can end in three ways, and the owner has to hear
+     * about all of them or it holds a connection slot and two file descriptors
+     * for a conversation that is over:
+     *
+     * <ul>
+     * <li>both directions half-closed and both pumps returned — the clean end,
+     * and the one nothing else signals: no exception is thrown and no callback
+     * fires,</li>
+     * <li>a pump failed and tore both sockets down,</li>
+     * <li>{@link #close()} was called.</li>
+     * </ul>
+     *
+     * By the time this completes, both sockets are closed. It never completes
+     * exceptionally — <em>why</em> the transport ended is the gRPC channel's
+     * story to tell, not the bridge's; this only says that it did. Waiting on
+     * it is optional: {@link #close()} is safe whether it completed or not, and
+     * is still what releases the channel.
+     *
+     * @return a future completed once both pumps have exited and both sockets
+     *         are closed
+     */
+    public CompletableFuture<Void> done() {
+        return this.done;
     }
 
     /**
@@ -143,6 +206,8 @@ public final class SocketBridge implements Closeable {
         } catch (IOException e) {
             // Ordinary: this is also how close() wakes this thread up
             LOGGER.log(Level.FINE, "bridge " + this.id + " stopped listening before it was dialled", e);
+            // Nothing was ever dialled, so no pump is going to report the end
+            finish();
             return;
         } finally {
             closeQuietly(this.listener, "listener");
@@ -156,19 +221,22 @@ public final class SocketBridge implements Closeable {
         } catch (IOException e) {
             LOGGER.log(Level.FINE, "bridge " + this.id + " could not configure its sockets", e);
             closeQuietly(accepted, "loopback socket");
-            closeQuietly(this.orchestrator, "orchestrator socket");
+            finish();
             return;
         }
 
         synchronized (this.lock) {
             if (this.closed) {
-                // Raced with close(): nobody is going to take this one down
-                // anymore, so it is ours to close
+                // Raced with close(): the socket arrived after close() took its
+                // snapshot, so nobody else is ever going to take it down and it
+                // is ours to close. close() completes done, this thread does
+                // not — it may still be in its channel shutdown.
                 closeQuietly(accepted, "loopback socket");
                 return;
             }
 
             this.grpc = accepted;
+            this.running.set(2);
             this.pumps.add(pump("in", this.orchestrator, accepted, this.remainder));
             this.pumps.add(pump("out", accepted, this.orchestrator, new byte[0]));
         }
@@ -225,7 +293,35 @@ public final class SocketBridge implements Closeable {
             // read or write, and both sockets are of no use without the pump
             LOGGER.log(Level.FINE, name + " stopped: " + e.getMessage(), e);
             closeSockets();
+        } catch (Throwable t) {
+            // Not expected — but a pump that dies without taking its sockets
+            // with it leaves a connection nobody is serving anymore, and that
+            // is the one outcome this class exists to prevent
+            LOGGER.log(Level.WARNING, name + " failed unexpectedly", t);
+            closeSockets();
+            if (t instanceof Error) {
+                throw (Error) t;
+            }
+        } finally {
+            // The last one out closes the door. This is what makes the clean
+            // double half-close — both pumps returning normally, no exception
+            // anywhere — end the connection instead of leaking it.
+            if (this.running.decrementAndGet() == 0) {
+                finish();
+            }
         }
+    }
+
+    /**
+     * Closes both sockets and tells the owner the bridge is spent.
+     *
+     * Idempotent by way of {@link Socket#close()} being idempotent and
+     * {@link CompletableFuture#complete} returning false the second time, so
+     * every path out of this class may call it.
+     */
+    private void finish() {
+        closeSockets();
+        this.done.complete(null);
     }
 
     /**
@@ -237,7 +333,15 @@ public final class SocketBridge implements Closeable {
      *
      * Idempotent, and safe at any point in this bridge's life — including
      * before anything ever dialled in, when it returns as fast as the accept
-     * thread can be woken.
+     * thread can be woken. It completes {@link #done()} on its way out, so an
+     * owner watching that future hears about a close as well as about a
+     * connection that ended by itself.
+     *
+     * <b>Worst case 8 s</b>: {@link #SHUTDOWN_SECONDS} for a channel that will
+     * not terminate, plus {@link #JOIN_MILLIS} each for the accept thread and
+     * the two pumps. In practice it is milliseconds. A server closing many
+     * bridges within one shutdown grace should still close them in parallel —
+     * one of these fits in a 10 s grace, thirty-two in a row do not.
      */
     @Override
     public void close() {
@@ -276,6 +380,10 @@ public final class SocketBridge implements Closeable {
         for (Thread pump : toJoin) {
             join(pump);
         }
+
+        // The pumps normally get here first, on the exceptions the closes above
+        // raised in them; this covers the bridge that never had any
+        finish();
     }
 
     /**

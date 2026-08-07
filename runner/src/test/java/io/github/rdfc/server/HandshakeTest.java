@@ -234,6 +234,34 @@ class HandshakeTest {
         assertEquals(HandshakeException.Reason.EOF, reasonOf(() -> Handshake.read(this.server)));
     }
 
+    /** The strict decoder may only turn away what is really malformed. */
+    @Test
+    void aUriWithMultiByteCharactersIsAccepted() throws Exception {
+        var uri = "urn:test:café-☃-runner";
+        var bytes = (uri + "\n").getBytes(UTF_8);
+        assertTrue(bytes.length > uri.length(), "the test URI is not multi-byte after all");
+
+        send(bytes);
+        awaitArrival(bytes.length);
+
+        assertEquals(uri, Handshake.read(this.server).uri());
+    }
+
+    /**
+     * The timeout that was on the socket is what goes back on it, not a zero.
+     * A caller that set one meant it.
+     */
+    @Test
+    void aReadTimeoutSetByTheCallerIsPutBack() throws Exception {
+        this.server.setSoTimeout(1234);
+
+        send(URI + "\n");
+        awaitArrival(URI.length() + 1);
+
+        assertEquals(URI, Handshake.read(this.server).uri());
+        assertEquals(1234, this.server.getSoTimeout());
+    }
+
     /** Not the orchestrator, whoever it is. */
     @Test
     void aLineThatIsNotUtf8IsRejected() throws Exception {

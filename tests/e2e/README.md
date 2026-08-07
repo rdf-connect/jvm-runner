@@ -28,6 +28,8 @@ definitions, and the remote (TCP) runner protocol — not a stub of any of it.
 | `remote_pipeline.ttl`       | The pipeline the orchestrator runs.                                            |
 | `package.json`              | Pins the `@rdfc/orchestrator-js` version used to drive the pipeline.           |
 | `run-e2e.sh`                | The automated run: build, start, drive, assert, clean up.                       |
+| `docker-compose.yml`        | Optional: run the server as a container instead of a local process.            |
+| `run-e2e-docker.sh`         | The automated run, against that container.                                     |
 
 The processors themselves live in `../../test-processor/src/main/java/rdfc/test/`. They
 are built into `test-processor.jar`, which `run-e2e.sh` copies **next to `server.ttl`** —
@@ -103,6 +105,46 @@ is already taken, rather than testing against whatever is listening there.
 
 It is not wired into `./gradlew test`: it needs Node and a network fetch of the
 orchestrator, and it starts real servers on fixed ports.
+
+## Docker
+
+The same pipeline, with the server running as the image built from the repository's
+[`Dockerfile`](../../Dockerfile) instead of as a local `java -jar`:
+
+```shell
+./tests/e2e/run-e2e-docker.sh
+```
+
+It does what `run-e2e.sh` does, except that it starts the server with `docker compose`
+and reads its log with `docker compose logs` instead of from `server.log`. The
+orchestrator still runs **on the host**, against the published ports — which is what
+makes this a test of the container and not just of compose.
+
+By hand, the same thing:
+
+```shell
+./gradlew :test-processor:jar
+cp test-processor/build/libs/test-processor.jar tests/e2e/   # served out of /config
+cd tests/e2e
+docker compose up --build      # start the server
+npx rdfc remote_pipeline.ttl   # in another terminal
+docker compose down
+```
+
+`docker-compose.yml` mounts this directory read-only at `/config`, so the container
+serves the very files you are editing: `server.ttl`, `processors/*.ttl` **and**
+`test-processor.jar`. That jar is a build output, so it has to be copied here before
+`up` — otherwise the runner has nothing to load the processors from.
+
+> [!NOTE]
+> The image `EXPOSE`s `3000` and `50051` (the runner's default gRPC port), but this bed's
+> `server.ttl` uses `4001`, so compose publishes `4001:4001`. `EXPOSE` is documentation:
+> what a container listens on is whatever the mounted `server.ttl` says.
+
+`rdfc:hostname "localhost"` in `server.ttl` is what makes the host-side orchestrator able
+to call back: the container advertises itself under the name the orchestrator can reach,
+which here is the published port on the Docker host. An orchestrator running inside the
+same compose network would need the service name (`jvm-runner`) instead.
 
 ## The same pipeline without a server
 

@@ -15,13 +15,14 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.logging.Logger;
-import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -61,14 +62,6 @@ class RunnerJarLifecycleTest {
         return path.toUri().toString();
     }
 
-    /** Every jar this runner downloaded lands in the temp dir under this name. */
-    private static Set<Path> downloadedJars() throws IOException {
-        try (Stream<Path> files = Files.list(Path.of(System.getProperty("java.io.tmpdir")))) {
-            return files.filter(file -> file.getFileName().toString().startsWith("remote-lib"))
-                    .collect(java.util.stream.Collectors.toCollection(HashSet::new));
-        }
-    }
-
     private static void tearDown(FakeOrchestrator orchestrator) {
         orchestrator.fail(RunnerGrpc.getConnectMethod(), "connection dropped");
     }
@@ -83,6 +76,8 @@ class RunnerJarLifecycleTest {
         var second = runner.classLoaderFor(jar, LOGGER);
 
         assertSame(first, second, "two processors out of one jar were handed two class loaders");
+
+        tearDown(orchestrator);
     }
 
     @Test
@@ -94,6 +89,8 @@ class RunnerJarLifecycleTest {
         var other = runner.classLoaderFor(jarAt(dir.resolve("other.jar")), LOGGER);
 
         assertNotSame(one, other);
+
+        tearDown(orchestrator);
     }
 
     @Test
@@ -147,21 +144,87 @@ class RunnerJarLifecycleTest {
             var runner = TestRunner.create(orchestrator, "http://example.org/runner/jars-downloaded");
             var url = "http://127.0.0.1:" + server.getAddress().getPort() + "/processors.jar";
 
-            var before = downloadedJars();
             var loader = runner.classLoaderFor(url, LOGGER);
             assertSame(loader, runner.classLoaderFor(url, LOGGER));
             assertEquals(1, requests.get(), "the same jar was downloaded more than once");
 
-            var downloaded = downloadedJars();
-            downloaded.removeAll(before);
-            assertEquals(1, downloaded.size(), "expected exactly one downloaded jar, got " + downloaded);
-            var copy = downloaded.iterator().next();
+            var copy = runner.downloadedCopyOf(url);
+            assertNotNull(copy, "the remote jar was not downloaded to a copy of its own");
             assertTrue(Files.exists(copy));
 
             tearDown(orchestrator);
 
             assertFalse(Files.exists(copy), "the downloaded jar was left behind in " + copy);
         } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * The one thing a download may never do: hold up the teardown.
+     *
+     * A jar server that accepts the connection and then says nothing used to park
+     * the whole teardown behind it, on a gRPC callback thread — no `onComplete`, no
+     * completion, a connection that never ends. A stalled download may cost the
+     * processor that wants that jar; it may not cost the runner its ending.
+     */
+    @Test
+    void aStalledDownloadDoesNotHoldUpTheTeardown(@TempDir Path dir) throws Exception {
+        var jar = Files.readAllBytes(Path.of(java.net.URI.create(jarAt(dir.resolve("processors.jar")))));
+        var downloading = new CountDownLatch(1);
+        var answer = new CountDownLatch(1);
+
+        var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/processors.jar", exchange -> {
+            downloading.countDown();
+            try {
+                // The stall: the connection is accepted and then nothing happens
+                answer.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.sendResponseHeaders(200, jar.length);
+            try (var body = exchange.getResponseBody()) {
+                body.write(jar);
+            }
+        });
+        server.start();
+
+        var threads = Executors.newFixedThreadPool(2, runnable -> {
+            var thread = new Thread(runnable, "jar-loader");
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        try {
+            var orchestrator = new FakeOrchestrator();
+            var runner = TestRunner.create(orchestrator, "http://example.org/runner/jars-stalled");
+            var url = "http://127.0.0.1:" + server.getAddress().getPort() + "/processors.jar";
+
+            var loading = threads.submit(() -> runner.classLoaderFor(url, LOGGER));
+            assertTrue(downloading.await(5, TimeUnit.SECONDS), "the download never started");
+
+            // A second processor out of the same jar waits for that one download
+            var waiting = threads.submit(() -> runner.classLoaderFor(url, LOGGER));
+
+            // Bounded by the rig, which gives the delivery five seconds: against a
+            // teardown that waits for the download this times out
+            tearDown(orchestrator);
+
+            assertThrows(ExecutionException.class, () -> runner.completion().get(5, TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class, () -> waiting.get(5, TimeUnit.SECONDS),
+                    "the second processor was left waiting for a download nobody is going to use");
+
+            // And when the server finally does answer, the loader that arrives too
+            // late is not handed out and not kept either
+            answer.countDown();
+            var late = assertThrows(ExecutionException.class, () -> loading.get(30, TimeUnit.SECONDS));
+            assertTrue(late.getCause().getMessage().contains("torn down"),
+                    "the download did not notice the teardown: " + late.getCause());
+            assertNull(runner.downloadedCopyOf(url), "the runner held on to a jar it loaded after its teardown");
+        } finally {
+            answer.countDown();
+            threads.shutdownNow();
             server.stop(0);
         }
     }

@@ -8,7 +8,6 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -43,6 +42,11 @@ import rdfc.Service.ToRunner;
  */
 public class Runner implements StreamObserver<ToRunner> {
 
+    /** How long to wait for a jar server to accept the connection. */
+    private static final int CONNECT_TIMEOUT_MS = 30_000;
+    /** How long to wait for the next block of a jar that is being downloaded. */
+    private static final int READ_TIMEOUT_MS = 60_000;
+
     public final StreamObserver<FromRunner> stream;
 
     protected final RunnerGrpc.RunnerStub stub;
@@ -76,13 +80,15 @@ public class Runner implements StreamObserver<ToRunner> {
     private final Set<CompletableFuture<?>> inFlight = ConcurrentHashMap.newKeySet();
 
     /**
-     * Per jar URL the class loader that was built for it, so several processors out
+     * Per jar URL the promise of the class loader for it, so several processors out
      * of the same jar download and load that jar exactly once.
      *
-     * Guarded by its own monitor rather than concurrent, because filling an entry
-     * downloads a file and that may not happen twice — see {@link #classLoaderFor}.
+     * A promise and not the loader itself: the entry is claimed before the download
+     * starts, so the second caller waits for the first one's download instead of
+     * starting its own, and the teardown can fail an entry that is still being
+     * filled without waiting for it — see {@link #classLoaderFor}.
      */
-    private final Map<String, LoadedJar> jars = new HashMap<>();
+    private final Map<String, CompletableFuture<LoadedJar>> jars = new ConcurrentHashMap<>();
 
     /**
      * Mapper used to deserialize the config for each processor.
@@ -474,7 +480,9 @@ public class Runner implements StreamObserver<ToRunner> {
             // Reported before the callbacks are handed back: that hand-back can be
             // what ends this runner, and then the stream is completed and nothing can
             // be sent on it anymore.
-            this.sendProcInit(uri, Optional.of(error.toString()));
+            // The root cause, like the acknowledgements: the orchestrator shows this
+            // string to a user
+            this.sendProcInit(uri, Optional.of(Errors.describe(error)));
         } catch (Exception e) {
             this.logger.severe("Could not report the failed init of " + uri + ": " + e);
         } finally {
@@ -506,20 +514,6 @@ public class Runner implements StreamObserver<ToRunner> {
     }
 
     /**
-     * Calls one of a processor's phases and hands back a future that always
-     * exists, whatever the processor does.
-     *
-     * A phase is written by whoever wrote the processor, so it may well throw
-     * instead of returning a failed future, or hand back null. Both are turned
-     * into an ordinary future here, so every caller has exactly one failure path
-     * and a callback the runner is waiting for can never go missing. A phase that
-     * returns null is taken to have finished right away.
-     *
-     * @param phase the phase to call
-     * @return the phase's future, a failed one when it threw, a completed one when
-     *         it returned null
-     */
-    /**
      * Remembers a processor's future for as long as this runner waits for it, so a
      * teardown can stop waiting for it.
      *
@@ -535,6 +529,20 @@ public class Runner implements StreamObserver<ToRunner> {
         return phase;
     }
 
+    /**
+     * Calls one of a processor's phases and hands back a future that always
+     * exists, whatever the processor does.
+     *
+     * A phase is written by whoever wrote the processor, so it may well throw
+     * instead of returning a failed future, or hand back null. Both are turned
+     * into an ordinary future here, so every caller has exactly one failure path
+     * and a callback the runner is waiting for can never go missing. A phase that
+     * returns null is taken to have finished right away.
+     *
+     * @param phase the phase to call
+     * @return the phase's future, a failed one when it threw, a completed one when
+     *         it returned null
+     */
     private static CompletableFuture<?> phase(Supplier<CompletableFuture<?>> phase) {
         try {
             var out = phase.get();
@@ -565,6 +573,13 @@ public class Runner implements StreamObserver<ToRunner> {
      */
     @Override
     public void onError(Throwable t) {
+        if (this.finished.get()) {
+            // The ordinary end: this runner finished, closed the channel itself, and
+            // the call it was closing is reported back as cancelled
+            this.logger.fine("The connection to the orchestrator ended: " + Errors.describe(t));
+            return;
+        }
+
         // Warning, not severe: losing the connection is expected, and severe would
         // try to report it over the very connection that just died
         this.logger.warning("The connection to the orchestrator failed: " + Errors.describe(t));
@@ -669,58 +684,106 @@ public class Runner implements StreamObserver<ToRunner> {
      * per runner — per runner, and not statically, because the loaders and the
      * downloads are released when this runner is torn down.
      *
-     * Whole method under one lock: two processors out of the same jar are handled
-     * one after the other, and downloading the same file twice in parallel is
-     * exactly what this is here to prevent.
+     * What is cached is the <em>promise</em> of a loader, not the loader: the
+     * download is done outside every lock this class holds. Downloading under a
+     * lock the teardown also wants means a jar server that accepts the connection
+     * and then says nothing parks the teardown behind it — and the teardown runs on
+     * a gRPC callback thread, so that would be a stuck connection, an `onComplete`
+     * that never runs and a {@link #completion()} that never completes. A stalled
+     * download may cost the processor that wants that jar; it may not cost the
+     * runner its ending.
      *
      * @param jar    URL of the jar
      * @param logger to report the download on
      * @return the loader for that jar
-     * @throws Exception when the jar cannot be reached or read
+     * @throws Exception when the jar cannot be reached or read, or when this runner
+     *                   was torn down while it was being loaded
      */
     URLClassLoader classLoaderFor(String jar, Logger logger) throws Exception {
-        synchronized (this.jars) {
-            if (this.finished.get()) {
-                // The teardown already closed everything in here, a loader made now
-                // would never be closed again
-                throw new IllegalStateException("this runner was torn down, " + jar + " is not loaded anymore");
-            }
+        var promise = new CompletableFuture<LoadedJar>();
+        var running = this.jars.putIfAbsent(jar, promise);
 
-            var known = this.jars.get(jar);
-            if (known != null) {
-                logger.fine("Reusing the class loader for " + jar);
-                return known.loader;
-            }
-
-            URL jarUrl = new URI(jar).toURL();
-
-            Path jarPath;
-            Path downloaded = null;
-            // if the jar is still remote, download the entire Jar to a temporary location
-            // Otherwise, just point to the physical jar location.
-            if (jarUrl.getProtocol().equalsIgnoreCase("http") || jarUrl.getProtocol().equalsIgnoreCase("https")) {
-                // Remote JAR, download it
-                logger.info("Downloading JAR from " + jar);
-                // Download JAR to temp dir
-                jarPath = Files.createTempFile("remote-lib", ".jar");
-                // Belt and braces: the teardown deletes this, and should the runner
-                // never be torn down the JVM still cleans it up on the way out
-                jarPath.toFile().deleteOnExit();
-                downloaded = jarPath;
-                try (InputStream in = jarUrl.openStream()) {
-                    Files.copy(in, jarPath, StandardCopyOption.REPLACE_EXISTING);
-                }
-                logger.info("End download");
-            } else {
-                // Local JAR, use it directly
-                jarPath = Path.of(jarUrl.toURI());
-            }
-
-            // Use local URLClassLoader
-            var loaded = new LoadedJar(new URLClassLoader(new URL[] { jarPath.toUri().toURL() }), downloaded);
-            this.jars.put(jar, loaded);
-            return loaded.loader;
+        if (running != null) {
+            // Somebody is already loading this jar, or already has: wait for that
+            // one instead of downloading the same file a second time
+            logger.fine("Reusing the class loader for " + jar);
+            return running.get().loader;
         }
+
+        if (this.finished.get()) {
+            // Checked after claiming the entry, so this cannot slip past a teardown
+            // that is running right now: either it sees our entry and fails it, or
+            // we see its flag here.
+            this.jars.remove(jar, promise);
+            throw new IllegalStateException("this runner was torn down, " + jar + " is not loaded anymore");
+        }
+
+        LoadedJar loaded;
+        try {
+            loaded = this.load(jar, logger);
+        } catch (Throwable t) {
+            // Taken out again, so a later processor out of the same jar may try once
+            // more rather than inherit this failure forever
+            this.jars.remove(jar, promise);
+            promise.completeExceptionally(t);
+            throw t;
+        }
+
+        if (!promise.complete(loaded)) {
+            // The teardown failed this entry while the download was running, so it
+            // never saw this loader and will never close it. Nobody else can reach
+            // it either, so it is released right here.
+            this.release(jar, loaded);
+            throw new IllegalStateException("this runner was torn down while " + jar + " was being loaded");
+        }
+
+        return loaded.loader;
+    }
+
+    /**
+     * Fetches a jar and builds the loader for it. Does the talking to the network,
+     * so it is called without holding anything.
+     *
+     * @param jar    URL of the jar
+     * @param logger to report the download on
+     * @return the loader, and the copy that was downloaded for it
+     * @throws Exception when the jar cannot be reached or read
+     */
+    private LoadedJar load(String jar, Logger logger) throws Exception {
+        URL jarUrl = new URI(jar).toURL();
+
+        Path jarPath;
+        Path downloaded = null;
+        // if the jar is still remote, download the entire Jar to a temporary location
+        // Otherwise, just point to the physical jar location.
+        if (jarUrl.getProtocol().equalsIgnoreCase("http") || jarUrl.getProtocol().equalsIgnoreCase("https")) {
+            // Remote JAR, download it
+            logger.info("Downloading JAR from " + jar);
+            // Download JAR to temp dir
+            jarPath = Files.createTempFile("remote-lib", ".jar");
+            // Belt and braces: the teardown deletes this, and should the runner
+            // never be torn down the JVM still cleans it up on the way out
+            jarPath.toFile().deleteOnExit();
+            downloaded = jarPath;
+
+            // With timeouts, because the default is to wait forever: a jar server
+            // that accepts the connection and then goes quiet would otherwise hold
+            // this processor's init open for as long as the pipeline runs
+            var connection = jarUrl.openConnection();
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+
+            try (InputStream in = connection.getInputStream()) {
+                Files.copy(in, jarPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            logger.info("End download");
+        } else {
+            // Local JAR, use it directly
+            jarPath = Path.of(jarUrl.toURI());
+        }
+
+        // Use local URLClassLoader
+        return new LoadedJar(new URLClassLoader(new URL[] { jarPath.toUri().toURL() }), downloaded);
     }
 
     /**
@@ -730,31 +793,65 @@ public class Runner implements StreamObserver<ToRunner> {
      * A loader keeps the jar file open, which on Windows means the file cannot be
      * deleted, and in server mode a runner that comes and goes would otherwise
      * leave both behind on every connection.
+     *
+     * A download that is still running is not waited for. Its entry is failed, so
+     * whoever waits on it gives up now instead of after a network timeout, and the
+     * loader that download may still produce is released by the thread that
+     * produces it — see {@link #classLoaderFor}.
      */
     private void closeJars() {
-        synchronized (this.jars) {
-            for (var entry : this.jars.entrySet()) {
-                var loaded = entry.getValue();
+        for (var entry : this.jars.entrySet()) {
+            var jar = entry.getKey();
+            var promise = entry.getValue();
 
-                try {
-                    loaded.loader.close();
-                } catch (Exception e) {
-                    this.logger.warning("Could not close the class loader for " + entry.getKey() + ": " + e);
-                }
-
-                if (loaded.downloaded == null) {
-                    continue;
-                }
-
-                try {
-                    Files.deleteIfExists(loaded.downloaded);
-                } catch (Exception e) {
-                    this.logger.warning("Could not delete the downloaded jar " + loaded.downloaded + ": " + e);
-                }
-            }
-
-            this.jars.clear();
+            // A no-op for everything that already loaded
+            promise.completeExceptionally(
+                    new IllegalStateException("this runner was torn down while " + jar + " was being loaded"));
+            // And this one is a no-op for everything that did not
+            promise.thenAccept(loaded -> this.release(jar, loaded));
         }
+
+        this.jars.clear();
+    }
+
+    /**
+     * Lets go of one loaded jar: closes the loader and deletes the copy that was
+     * downloaded for it, if any.
+     *
+     * @param jar    URL it was loaded from, for the log
+     * @param loaded what to release
+     */
+    private void release(String jar, LoadedJar loaded) {
+        try {
+            loaded.loader.close();
+        } catch (Exception e) {
+            this.logger.warning("Could not close the class loader for " + jar + ": " + e);
+        }
+
+        if (loaded.downloaded == null) {
+            return;
+        }
+
+        try {
+            Files.deleteIfExists(loaded.downloaded);
+        } catch (Exception e) {
+            this.logger.warning("Could not delete the downloaded jar " + loaded.downloaded + ": " + e);
+        }
+    }
+
+    /**
+     * The copy this runner downloaded for a jar, or null when it did not download
+     * one. Visible for testing.
+     *
+     * @param jar URL of the jar
+     * @return the temporary copy, or null
+     */
+    Path downloadedCopyOf(String jar) {
+        var promise = this.jars.get(jar);
+        if (promise == null || !promise.isDone() || promise.isCompletedExceptionally()) {
+            return null;
+        }
+        return promise.join().downloaded;
     }
 
     /**

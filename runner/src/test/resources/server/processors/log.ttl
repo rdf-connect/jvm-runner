@@ -1,0 +1,7 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+# No label and no comment: the index has to leave them out rather than invent them.
+<http://example.org/Log> a rdfc:Processor;
+  rdfc:javaImplementationOf <http://example.org/LogDefinition>;
+  rdfc:jar "log.jar";
+  rdfc:class "org.example.Log".

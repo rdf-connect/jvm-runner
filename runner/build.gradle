@@ -31,9 +31,19 @@ tasks.named('shadowJar') {
 
 shadowJar {
   duplicatesStrategy = DuplicatesStrategy.INCLUDE // Or something else.
-    mergeServiceFiles {
-        include("META-INF/services/io.grpc.*")
-    }
+    // Unfiltered on purpose. It used to be `include("META-INF/services/io.grpc.*")`,
+    // which merges gRPC's service files and leaves every other one to be copied as
+    // an ordinary resource. Together with the duplicatesStrategy above that is a
+    // trap: as soon as two dependencies declare the same service, both entries go
+    // into the archive under the same name and the ServiceLoader reads whichever
+    // one came first — half the providers silently gone.
+    //
+    // RDF4J's Rio finds its parsers and writers exactly that way
+    // (META-INF/services/org.eclipse.rdf4j.rio.RDFParserFactory and friends). Today
+    // only rdf4j-rio-turtle declares them, so the filtered version happens to
+    // survive; adding a second Rio format would break the fat jar while `gradle
+    // test`, which runs off the classpath and not out of the jar, stayed green.
+    mergeServiceFiles()
 }
 
 // register a "fake jar" if Maven requires a Jar type
@@ -58,6 +68,17 @@ dependencies {
     implementation 'com.google.protobuf:protobuf-java:4.28.2'
 
     implementation 'com.google.guava:guava:33.4.5-jre'
+
+    // RDF4J 4.x, not 5.x: 5.x is compiled for Java 17 and this runner targets 11.
+    implementation 'org.eclipse.rdf4j:rdf4j-model:4.3.15'
+    implementation 'org.eclipse.rdf4j:rdf4j-rio-turtle:4.3.15'
+    // RDF4J logs through SLF4J, which prints three "Failed to load class
+    // StaticLoggerBinder" lines on every start when it finds no binding — on every
+    // `java -jar runner-all.jar` as well, where nothing about RDF4J is involved.
+    // This runner's own logging is java.util.logging (see Logging), so route SLF4J
+    // there: whatever RDF4J has to say then comes out through the same handler at
+    // the same LOG_LEVEL as everything else.
+    runtimeOnly 'org.slf4j:slf4j-jdk14:1.7.36'
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

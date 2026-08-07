@@ -140,9 +140,30 @@ public class Runner implements StreamObserver<ToRunner> {
 
     protected final String uri;
 
+    /**
+     * Told about every message this runner carries, for the server's dashboard.
+     *
+     * {@link RunnerObserver#NOOP} outside server mode, so the CLI pays nothing for
+     * statistics nobody looks at.
+     */
+    private final RunnerObserver observer;
+
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete) {
+        this(stub, uri, onComplete, RunnerObserver.NOOP);
+    }
+
+    /**
+     * Builds a runner that reports its traffic.
+     *
+     * @param stub       the connection to the orchestrator
+     * @param uri        identifying this runner
+     * @param onComplete run when this runner is done and has released everything
+     * @param observer   told about every message that goes over a channel
+     */
+    public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete, RunnerObserver observer) {
         this.uri = uri;
         this.onComplete = onComplete;
+        this.observer = observer;
         this.stub = stub;
         this.logger = this.createLogger(uri, "cli");
         this.mapper = new ObjectMapper();
@@ -385,6 +406,11 @@ public class Runner implements StreamObserver<ToRunner> {
             var msg = value.getMsg();
             var reader = this.readers.get(msg.getChannel());
             if (reader != null) {
+                // Only what a processor actually receives is counted: a message for a
+                // channel nobody reads is dropped, and counting it would show traffic
+                // on a channel that has no reader.
+                this.observe(msg.getChannel(), RunnerObserver.Role.READER, msg.getData().size());
+
                 reader.msg(msg.getData()).whenComplete((_void, e) -> {
                     if (e != null) {
                         this.logger.severe("Error handling message on channel " + msg.getChannel() + ": " + e);
@@ -735,6 +761,30 @@ public class Runner implements StreamObserver<ToRunner> {
         var builder = FromRunner.newBuilder();
         builder.setMsg(SendingMessage.newBuilder().setChannel(channel).setData(data));
         this.stream.onNext(builder.build());
+
+        // After the send, not before: a message the transport refused never went
+        // anywhere and has no business in the statistics
+        this.observe(channel, RunnerObserver.Role.WRITER, data.size());
+    }
+
+    /**
+     * Tells the observer about a message, whatever it does with that.
+     *
+     * Guarded, because this runs on the gRPC callback threads and on whichever
+     * thread a processor produces on: an observer that throws would take a
+     * connection down over a counter, and in server mode that would be one
+     * orchestrator's pipeline killed by another one's dashboard.
+     *
+     * @param channel the message went over
+     * @param role    whether this runner read it or wrote it
+     * @param bytes   the size of its payload
+     */
+    private void observe(String channel, RunnerObserver.Role role, int bytes) {
+        try {
+            this.observer.onMessage(channel, role, bytes);
+        } catch (Throwable t) {
+            this.logger.fine("The runner observer failed on " + role.wire() + " " + channel + ": " + t);
+        }
     }
 
     /**

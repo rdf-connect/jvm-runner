@@ -34,11 +34,33 @@ import io.github.rdfc.JarResolver;
  * under a name that the port mapping, the compose network or the reverse proxy
  * chose, and the jar URL then carries whichever of those names the orchestrator
  * happened to use. Requiring the two hosts to match would switch this off exactly
- * where it is needed most. The safety does not come from the host: it comes from
- * the file having to resolve, canonically, to something inside the serving root.
+ * where it is needed most.
+ *
+ * <b>So the prefix check is not a guard, and in the shipped configuration it is
+ * not even a filter.</b> The advertised runner is {@code <base>jvmRunner}, whose
+ * path is {@code /jvmRunner}, so the base path is {@code /} and every path is
+ * under it — the check only does anything for a server mounted deeper. What
+ * actually decides are the two conditions after it, and they are the ones to
+ * keep in mind when changing this class:
+ *
+ * <ul>
+ * <li>the URL has to end in {@code .jar}, so a URL naming something this server
+ * serves for other reasons — a catalogue, an ontology — is never handed to a
+ * class loader, whoever sends it;</li>
+ * <li>the file has to resolve, canonically, to a regular file inside the serving
+ * root, so neither a {@code ..} segment nor a symlink out of the tree reaches
+ * anything else.</li>
+ * </ul>
+ *
+ * Every substitution is logged at INFO with both the URL and the file, because a
+ * runner quietly loading something other than what it was told to load is
+ * exactly the kind of thing that has to be visible in a log.
  */
 public final class ServedJars implements JarResolver {
     private static final Logger LOGGER = Logger.getLogger(ServedJars.class.getName());
+
+    /** The only thing this maps onto a file, whatever else is under the root. */
+    static final String SUFFIX = ".jar";
 
     private final Path serveRoot;
 
@@ -98,9 +120,10 @@ public final class ServedJars implements JarResolver {
      * The served file a jar URL names, when it names one.
      *
      * Every step can say no, and every no means "download it the ordinary way":
-     * a URL that is not {@code http(s)}, a path that does not sit under the
-     * runner's own, a file that resolves outside the serving root — a {@code ..}
-     * or a symlink pointing out of the tree — or one that is not there at all.
+     * a URL that is not {@code http(s)}, one that does not name a {@code .jar},
+     * a path that does not sit under the runner's own, a file that resolves
+     * outside the serving root — a {@code ..} or a symlink pointing out of the
+     * tree — or one that is not there at all.
      *
      * @param jarUrl the URL out of the processor's description
      * @return the file to load, or empty
@@ -116,6 +139,15 @@ public final class ServedJars implements JarResolver {
         // containment check below in an encoding this class does not undo
         String path = uri.getPath();
         if (path == null || !path.startsWith(this.basePath)) {
+            return Optional.empty();
+        }
+
+        // Only jars. Without this, anything under the serving root that a URL can
+        // name — a catalogue, an ontology, whatever else ends up in that tree — is
+        // a candidate for being opened as a class loader's archive, and the prefix
+        // above is no filter at all at the root base this server advertises.
+        if (!path.toLowerCase(Locale.ROOT).endsWith(SUFFIX)) {
+            LOGGER.fine("Not mapping " + jarUrl + " onto a file: it does not name a " + SUFFIX);
             return Optional.empty();
         }
 
@@ -148,6 +180,10 @@ public final class ServedJars implements JarResolver {
             return Optional.empty();
         }
 
+        // INFO, not fine: this runner is about to load something other than what
+        // it was handed, and that may not be a thing anybody has to turn debug
+        // logging on to find out about
+        LOGGER.info("Loading " + jarUrl + " from " + real + " instead of fetching it");
         return Optional.of(real);
     }
 

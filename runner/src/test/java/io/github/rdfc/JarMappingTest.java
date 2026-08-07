@@ -13,10 +13,15 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import org.junit.jupiter.api.Test;
@@ -195,6 +200,79 @@ class JarMappingTest {
         } finally {
             jars.stop(0);
         }
+    }
+
+    /**
+     * The prefix check is vacuous at the base this server actually advertises —
+     * the runner is {@code <base>jvmRunner}, so its base path is {@code /} and
+     * every path is under it. What keeps a URL from turning any served file into
+     * a class loader's archive is the suffix: only a {@code .jar} is ever mapped,
+     * whoever sends the URL and whatever host it names.
+     */
+    @Test
+    void onlyJarsAreMappedOntoServedFiles(@TempDir Path root) throws Exception {
+        Path serveRoot = Files.createDirectories(root.resolve("serve"));
+        Files.write(serveRoot.resolve("server.ttl"), "# a served catalogue, not an archive\n".getBytes(UTF_8));
+        jarAt(serveRoot.resolve("echo.jar"));
+
+        JarResolver resolver = ServedJars.of(serveRoot, RUNNER_URI);
+        // The base path really is "/", so this URL passes the prefix check
+        assertEquals("/", ((ServedJars) resolver).basePath());
+
+        assertEquals(Optional.empty(), resolver.resolve("http://anything/server.ttl"),
+                "a served file that is not a jar was handed to a class loader");
+        assertEquals(Optional.empty(), resolver.resolve(DEAD + "/server.ttl"));
+        assertEquals(Optional.of(serveRoot.resolve("echo.jar").toRealPath()),
+                resolver.resolve(DEAD + "/echo.jar"), "a jar under the root stopped being mapped");
+
+        FakeOrchestrator orchestrator = new FakeOrchestrator();
+        Runner runner = runner(orchestrator, RUNNER_URI, resolver);
+        try {
+            assertThrows(IOException.class, () -> runner.classLoaderFor(DEAD + "/server.ttl", LOGGER),
+                    "a .ttl under the serving root was loaded instead of downloaded");
+        } finally {
+            tearDown(orchestrator);
+        }
+    }
+
+    /**
+     * A runner loading something other than what it was told to load is exactly
+     * the kind of thing that has to be findable in a log without turning debug
+     * logging on.
+     */
+    @Test
+    void aSubstitutionIsLoggedAtInfo(@TempDir Path root) throws Exception {
+        Path serveRoot = Files.createDirectories(root.resolve("serve"));
+        String jar = jarAt(serveRoot.resolve("processors/echo.jar")).toRealPath().toString();
+
+        Logger resolverLog = Logger.getLogger(ServedJars.class.getName());
+        List<LogRecord> records = new ArrayList<>();
+        Handler capture = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        resolverLog.addHandler(capture);
+
+        try {
+            ServedJars.of(serveRoot, RUNNER_URI).resolve(DEAD + "/processors/echo.jar");
+        } finally {
+            resolverLog.removeHandler(capture);
+        }
+
+        assertTrue(records.stream().anyMatch(record -> record.getLevel().intValue() >= Level.INFO.intValue()
+                && record.getMessage().contains("/processors/echo.jar")
+                && record.getMessage().contains(jar)),
+                "the substitution was not logged at INFO with both the URL and the file: " + records);
     }
 
     /** A runner that is not named by an http(s) URL can map nothing at all. */

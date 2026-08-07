@@ -46,14 +46,18 @@ public final class RdfcServer {
         RunnerServer server;
         try {
             server = new RunnerServer(ServerConfig.parse(Paths.get(args[0])));
-            server.start();
-        } catch (ConfigException | ServerStartupError | InvalidPathException e) {
+        } catch (ConfigException | InvalidPathException e) {
             // Expected, operator-actionable failures: the reason, not a traceback
             LOGGER.severe(e.getMessage());
             System.exit(1);
             return;
         }
 
+        // Installed before the listeners are opened, not after: a signal arriving
+        // in between would otherwise find no hook and kill a process that has
+        // ports bound and possibly a connection on them. shutdown() on a server
+        // that never started is a no-op.
+        //
         // SIGINT and SIGTERM both land here. The hook returning is what lets the
         // JVM finish exiting, so the shutdown has to happen inside it rather than
         // only unblocking the main thread.
@@ -66,6 +70,14 @@ public final class RdfcServer {
             System.err.println("Stopping the JVM runner server...");
             server.shutdown();
         }, "rdfc-server-shutdown"));
+
+        try {
+            server.start();
+        } catch (ServerStartupError e) {
+            LOGGER.severe(e.getMessage());
+            System.exit(1);
+            return;
+        }
 
         try {
             server.awaitShutdown();

@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -313,8 +314,10 @@ public final class RunnerServer implements Closeable {
         try {
             this.connections.execute(connection);
         } catch (RejectedExecutionException e) {
+            // Nearly always a pool that is shutting down, but not necessarily —
+            // saying so unconditionally would hide whatever else it was
             this.live.remove(connection);
-            LOGGER.warning("Refusing runner connection from " + host + ": shutting down");
+            LOGGER.warning("Refusing runner connection from " + host + ": connection rejected: " + e);
             closeQuietly(socket, "refused connection");
         }
     }
@@ -341,9 +344,12 @@ public final class RunnerServer implements Closeable {
         String uri = handshake.uri();
         LOGGER.info("Orchestrator connection from " + connection.host + " for runner " + uri);
 
-        String id = this.state.registerRunner(connection.host, uri);
+        // Inside the try from here on: everything below can throw, and there is a
+        // socket to close and a registration to undo on the way out
+        String id = null;
         SocketBridge bridge = null;
         try {
+            id = this.state.registerRunner(connection.host, uri);
             bridge = new SocketBridge(connection.socket, handshake.remainder());
             connection.bridge = bridge;
 
@@ -352,34 +358,53 @@ public final class RunnerServer implements Closeable {
             ManagedChannel channel = bridge.channel();
             this.watchChannel(channel, id);
 
+            // Before the runner exists, not after: constructing it opens the
+            // stream, and from that moment the dashboard may be asked what this
+            // runner is doing. The py-runner sets it in the same place.
+            this.state.setStatus(id, State.Status.RUNNING);
             Runner runner = new Runner(RunnerGrpc.newStub(channel), uri, () -> {
             }, this.observerFor(id), ServedJars.of(this.serveRoot, uri));
-            this.state.setStatus(id, State.Status.RUNNING);
 
             this.awaitEnd(runner, bridge);
 
             this.state.setStatus(id, State.Status.DONE);
             LOGGER.info("Runner " + uri + " completed");
         } catch (InterruptedException e) {
-            this.state.markError(id, "the server shut down while this runner was running");
+            this.markError(id, "the server shut down while this runner was running");
             Thread.currentThread().interrupt();
         } catch (ExecutionException e) {
             // The everyday end of a remote connection: the orchestrator went away
             // before its pipeline was finished. One runner's problem, not this
             // process'.
-            this.state.markError(id, Errors.describe(e.getCause()));
+            this.markError(id, Errors.describe(e.getCause()));
             LOGGER.warning("Runner " + uri + " from " + connection.host + " ended: "
                     + Errors.describe(e.getCause()));
         } catch (Throwable t) {
-            this.state.markError(id, Errors.describe(t));
+            this.markError(id, Errors.describe(t));
             LOGGER.log(Level.WARNING, "Runner connection from " + connection.host + " failed", t);
         } finally {
-            this.state.deregisterRunner(id);
+            // Null when the registration itself was what failed: there is nothing
+            // to move into the history, only a socket to let go of
+            if (id != null) {
+                this.state.deregisterRunner(id);
+            }
             if (bridge != null) {
                 bridge.close();
             } else {
                 closeQuietly(connection.socket, "orchestrator socket");
             }
+        }
+    }
+
+    /**
+     * Marks a runner as failed, if it ever got as far as being registered.
+     *
+     * @param id      of the runner, null when the registration is what failed
+     * @param message what went wrong
+     */
+    private void markError(String id, String message) {
+        if (id != null) {
+            this.state.markError(id, message);
         }
     }
 
@@ -487,7 +512,7 @@ public final class RunnerServer implements Closeable {
             } else if ("/dashboard".equals(path)) {
                 status = respond(exchange, 200, HTML, this.dashboard);
             } else if ("/".equals(path)) {
-                status = respond(exchange, 200, TURTLE, this.index.generate(baseOf(exchange, this.config)));
+                status = respond(exchange, 200, TURTLE, this.serveIndex(exchange));
             } else {
                 status = this.serveFile(exchange, path);
             }
@@ -499,6 +524,36 @@ public final class RunnerServer implements Closeable {
         }
 
         LOGGER.fine(method + " " + path + " -> " + status);
+    }
+
+    /**
+     * Renders the index for the address this request came in on.
+     *
+     * The base is client-controlled — it is the {@code Host} header — and it ends
+     * up inside the IRIs of a Turtle document, so a header this server cannot
+     * turn into a base falls back on the configured address rather than becoming
+     * a 500. Two lines of defence, because the shape of the header and the shape
+     * of a legal IRI are not the same question: the pattern rejects what is
+     * obviously not a host, and whatever gets past it has to survive being
+     * assembled into a document.
+     *
+     * @param exchange the request
+     * @return the index document
+     */
+    private String serveIndex(HttpExchange exchange) {
+        String configured = "http://" + this.config.hostname() + ":" + this.config.httpPort() + "/";
+        String base = baseOf(exchange, configured);
+
+        try {
+            return this.index.generate(base);
+        } catch (RuntimeException e) {
+            if (base.equals(configured)) {
+                throw e;
+            }
+            LOGGER.warning("Cannot build an index for the requested base " + base + " (" + e
+                    + "); serving the configured one instead");
+            return this.index.generate(configured);
+        }
     }
 
     private int serveHealth(HttpExchange exchange) throws IOException {
@@ -561,16 +616,32 @@ public final class RunnerServer implements Closeable {
      * address it cannot reach. Plain {@code http}: this listener speaks nothing
      * else, and a TLS terminator in front of it is not something to guess at.
      *
-     * @param exchange the request
-     * @param config   the configuration, for the fallback
+     * @param exchange   the request
+     * @param configured the base to use when the request does not name a usable
+     *                   one
      * @return an absolute base URL ending in a slash
      */
-    private static String baseOf(HttpExchange exchange, ServerConfig config) {
+    private static String baseOf(HttpExchange exchange, String configured) {
         String host = exchange.getRequestHeaders().getFirst("Host");
         if (host == null || !HOST.matcher(host).matches()) {
-            host = config.hostname() + ":" + config.httpPort();
+            return configured;
         }
-        return "http://" + host + "/";
+
+        String base = "http://" + host + "/";
+        try {
+            // The pattern lets through things that are not IRIs — "::", "]", a
+            // bare colon — and those would only fail later, while a document is
+            // being assembled out of them
+            URI parsed = new URI(base);
+            if (parsed.getHost() == null && parsed.getAuthority() == null) {
+                return configured;
+            }
+        } catch (URISyntaxException e) {
+            LOGGER.fine("Ignoring the Host header '" + host + "': " + e);
+            return configured;
+        }
+
+        return base;
     }
 
     /**

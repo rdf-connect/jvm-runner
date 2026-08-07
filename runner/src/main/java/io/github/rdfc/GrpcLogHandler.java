@@ -9,6 +9,7 @@ import java.util.logging.Logger;
 
 import com.google.protobuf.Empty;
 
+import io.github.rdfc.helpers.StreamObserverWrapper;
 import io.grpc.stub.StreamObserver;
 import rdfc.RunnerGrpc;
 import rdfc.Service.LogMessage;
@@ -86,7 +87,7 @@ public class GrpcLogHandler extends Handler
     private final String uri;
 
     public GrpcLogHandler(RunnerGrpc.RunnerStub stub, String uri, String... entity) {
-        this.stream = stub.logStream(this);
+        this.stream = StreamObserverWrapper.silent(stub.logStream(this));
         this.uri = uri;
         this.entity = entity;
     }
@@ -94,9 +95,13 @@ public class GrpcLogHandler extends Handler
     /**
      * Constructor taking the outgoing stream directly, so the message construction
      * can be exercised without a gRPC connection.
+     *
+     * Log records are published from every thread in the runner, so the stream is
+     * wrapped to serialize the calls onto it. The wrapper does not log, that would
+     * recurse straight back into this handler.
      */
     GrpcLogHandler(StreamObserver<LogMessage> stream, String uri, String... entity) {
-        this.stream = stream;
+        this.stream = StreamObserverWrapper.silent(stream);
         this.uri = uri;
         this.entity = entity;
     }

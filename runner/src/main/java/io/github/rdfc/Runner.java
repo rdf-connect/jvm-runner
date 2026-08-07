@@ -8,8 +8,10 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.*;
 
 import java.util.logging.*;
@@ -41,9 +43,19 @@ public class Runner implements StreamObserver<ToRunner> {
 
     protected final RunnerGrpc.RunnerStub stub;
 
-    protected final HashMap<String, Reader> readers = new HashMap<>();
-    protected final HashMap<String, Writer> writers = new HashMap<>();
-    protected final HashMap<String, Processor<?>> processors = new HashMap<>();
+    // Channels are registered while processors are constructed, on whatever thread
+    // deserializes their arguments, and are looked up from the gRPC callback
+    // threads, so all three are concurrent.
+    protected final Map<String, Reader> readers = new ConcurrentHashMap<>();
+    protected final Map<String, Writer> writers = new ConcurrentHashMap<>();
+    protected final Map<String, Processor<?>> processors = new ConcurrentHashMap<>();
+
+    /**
+     * Per processor the future that completes when its init() finished (and its
+     * transform() was started). A processor may only produce once this completed,
+     * see the `start` message.
+     */
+    private final Map<String, CompletableFuture<Void>> initialized = new ConcurrentHashMap<>();
 
     /**
      * Mapper used to deserialize the config for each processor.
@@ -95,11 +107,22 @@ public class Runner implements StreamObserver<ToRunner> {
      * runner down.
      */
     private void decreaseAndCheckEnd() {
+        // decrementAndGet, so exactly one caller can ever observe the zero
         var v = this.awaiting.decrementAndGet();
         if (v == 0) {
             this.stream.onCompleted();
             this.onComplete.run();
         }
+    }
+
+    /**
+     * How many processor callbacks this runner is still waiting for. Visible for
+     * testing.
+     *
+     * @return the current value of the counter
+     */
+    int awaiting() {
+        return this.awaiting.get();
     }
 
     @Override
@@ -184,19 +207,9 @@ public class Runner implements StreamObserver<ToRunner> {
         }
 
         if (value.hasStart()) {
-            this.processors.forEach((k, v) -> {
-                // All processors are allowed to produce data
-                // After the production is finished, check for end
-                // (when starting the processor we added 2: one for transform and one for
-                // produce)
-                v.produce().whenComplete((output, e) -> {
-                    if (e != null) {
-                        this.logger.severe("Processor " + k + " produce exception: " + e);
-                        e.printStackTrace(System.err);
-                    }
-                    this.decreaseAndCheckEnd();
-                });
-            });
+            // All processors are allowed to produce data, but only once their own
+            // init() completed: producing before that is a protocol violation.
+            this.initialized.forEach(this::produceWhenInitialized);
 
             return;
         }
@@ -206,12 +219,18 @@ public class Runner implements StreamObserver<ToRunner> {
             var uri = proc.getUri();
 
             var procLogger = GrpcLogHandler.createLogger(stub, uri, this.uri);
+
+            // Claim both units up front, before init even starts: a `start` message can
+            // arrive while init is still pending, and if the counter were still zero
+            // by then the produce of an earlier processor could drop it below zero and
+            // this runner would never terminate.
+            // One is decreased when the transform is finished,
+            // one is decreased when the produce is finished.
+            this.awaiting.addAndGet(2);
+
             try {
                 Processor<?> processor = this.startProc(proc, procLogger);
-                processor.init().thenAccept(_void -> {
-                    // one is decreased when the transform is finished
-                    // one is decreased when the produce is finished
-                    this.awaiting.updateAndGet(x -> x + 2);
+                var init = processor.init().thenAccept(_void -> {
                     processor.transform().whenComplete((output, e) -> {
                         if (e != null) {
                             this.logger.severe("Processor " + uri + " transform exception: " + e);
@@ -221,13 +240,24 @@ public class Runner implements StreamObserver<ToRunner> {
                     });
                     // This processor is initialized: init is awaited and transform is started
                     this.sendProcInit(uri, Optional.empty());
-                }).exceptionally(e -> {
+                });
+
+                // Registered before returning, so the `start` message that the
+                // orchestrator sends after this one always finds it.
+                this.initialized.put(uri, init);
+
+                init.exceptionally(e -> {
                     e.printStackTrace();
+                    // Neither transform nor produce will run for this processor, hand both
+                    // units back. Deliberately without checking for the end: a processor
+                    // that failed to initialize is the orchestrator's problem.
+                    this.awaiting.addAndGet(-2);
                     this.sendProcInit(uri, Optional.of(e.toString()));
                     return null;
                 });
             } catch (Exception e) {
                 e.printStackTrace();
+                this.awaiting.addAndGet(-2);
                 this.sendProcInit(uri, Optional.of(e.toString()));
             }
 
@@ -260,7 +290,41 @@ public class Runner implements StreamObserver<ToRunner> {
         this.stream.onNext(orchestratorMessage.build());
     }
 
-    private Processor<?> startProc(rdfc.Service.Processor proc, Logger logger) throws Exception {
+    /**
+     * Lets a processor produce data, but not before it finished initializing.
+     *
+     * When init failed, produce is never called and the counter is left alone: the
+     * two units this processor claimed were already handed back when the init
+     * failed.
+     *
+     * @param uri  of the processor
+     * @param init future that completes when this processor is initialized
+     */
+    private void produceWhenInitialized(String uri, CompletableFuture<Void> init) {
+        init.thenRun(() -> {
+            CompletableFuture<?> produced;
+            try {
+                produced = this.processors.get(uri).produce();
+            } catch (Throwable t) {
+                // A processor that throws instead of returning a failed future may not
+                // keep this runner from terminating.
+                var failed = new CompletableFuture<Object>();
+                failed.completeExceptionally(t);
+                produced = failed;
+            }
+
+            produced.whenComplete((output, e) -> {
+                if (e != null) {
+                    this.logger.severe("Processor " + uri + " produce exception: " + e);
+                    e.printStackTrace(System.err);
+                }
+                // After the production is finished, check for end
+                this.decreaseAndCheckEnd();
+            });
+        });
+    }
+
+    protected Processor<?> startProc(rdfc.Service.Processor proc, Logger logger) throws Exception {
         var uri = proc.getUri();
         var config = proc.getConfig();
         var params = proc.getArguments();

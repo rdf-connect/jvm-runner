@@ -1,6 +1,7 @@
 package io.github.rdfc.helpers;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -20,7 +21,11 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
     public final CompletableFuture<Void> endingFuture = new CompletableFuture<>();
     public final Logger logger;
 
-    private int at = 0;
+    /**
+     * The control messages are sent from whichever thread finished handling a
+     * chunk, so the counter has to be atomic.
+     */
+    private final AtomicInteger at = new AtomicInteger(0);
 
     public StreamReaderHelper(Reader reader, RunnerStub stub, Logger logger) {
         this.logger = logger;
@@ -39,7 +44,7 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
      */
     public void sendStreamControlMessage() {
         SendingStreamControl control = SendingStreamControl.newBuilder()
-                .setStreamSequenceNumber(this.at++)
+                .setStreamSequenceNumber(this.at.getAndIncrement())
                 .build();
         this.sendingStream.onNext(control);
     }

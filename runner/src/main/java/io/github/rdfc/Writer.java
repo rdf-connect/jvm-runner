@@ -1,8 +1,9 @@
 package io.github.rdfc;
 
 import java.util.logging.*;
-import java.util.Optional;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import com.google.protobuf.ByteString;
 
@@ -15,7 +16,16 @@ public class Writer extends IWriter {
     private Runner runner;
     public String id;
 
-    private Optional<CompletableFuture<Void>> nextProcessed = Optional.empty();
+    /**
+     * Message-level acknowledgements, matched in FIFO order rather than by the
+     * protocol's localSequenceNumber -- same as the js-runner's
+     * awaitingProcessed, and the two should agree.
+     */
+    private final Queue<CompletableFuture<Void>> awaitingProcessed = new ConcurrentLinkedQueue<>();
+
+    /** A late acknowledgement after a close is a race, not a fault. */
+    private volatile boolean closed = false;
+
     private final Logger logger;
 
     public Writer(String id, Runner runner, Logger logger) {
@@ -34,28 +44,29 @@ public class Writer extends IWriter {
      */
     @Override
     public CompletableFuture<Void> chunk(ByteString chunk) {
+        var out = new CompletableFuture<Void>();
+
+        // Enqueue before sending: the ack arrives on a gRPC thread and can beat
+        // this method's return.
+        this.awaitingProcessed.add(out);
         this.runner.sendMessage(this.id, chunk);
 
-        if (this.nextProcessed.isPresent()) {
-            this.logger.warning(
-                    "Writer " + this.id + ": don't send a new chunk when the previous chunk is not yet awaited.");
-        }
-
-        var out = new CompletableFuture<Void>();
-        this.nextProcessed = Optional.of(out);
         return out;
     }
 
     @Override
     public CompletableFuture<Stream<ByteString>> stream() {
         var acknowledged = new CompletableFuture<Void>();
-        this.nextProcessed = Optional.of(acknowledged);
+
+        // Queued before sending, as in chunk().
+        this.awaitingProcessed.add(acknowledged);
         return StreamWriterHelper.build(runner.stub, this.id, this.runner.uri, acknowledged, this.logger)
                 // Type fixing
                 .thenApply(st -> st);
     }
 
     public CompletableFuture<Void> close() {
+        this.closed = true;
         this.runner.closeChannel(this.id);
         return CompletableFuture.completedFuture(null);
     }
@@ -66,10 +77,11 @@ public class Writer extends IWriter {
      * @param sequenceNumber that is processed
      */
     public void processed(int sequenceNumber) {
-        if (this.nextProcessed.isPresent()) {
-            var fut = this.nextProcessed.get();
+        var fut = this.awaitingProcessed.poll();
+        if (fut != null) {
             fut.complete(null);
-            this.nextProcessed = Optional.empty();
+        } else if (this.closed) {
+            // Nothing left to complete.
         } else {
             this.logger.warning("Writer " + this.id + " didn't expect a processed message.");
         }

@@ -58,7 +58,11 @@ public interface IReader {
             return new Iter<B>() {
                 public CompletableFuture<Void> on(Function<B, CompletableFuture<?>> f) {
                     Iter.this.callbacks.add(apply.andThen(f));
-                    return endFuture;
+                    // Iter.this, not the inherited field: this anonymous Iter is never
+                    // pushed to and never ended — only the one it wraps is — so its own
+                    // endFuture would never complete, and a processor whose transform
+                    // returns it would never finish.
+                    return Iter.this.endFuture;
                 }
             };
         }

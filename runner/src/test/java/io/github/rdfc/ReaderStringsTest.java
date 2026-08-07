@@ -74,6 +74,24 @@ class ReaderStringsTest {
         assertEquals(List.of(MULTI_BYTE), received);
     }
 
+    /**
+     * The future {@code on} hands back is how a processor learns that its input
+     * ended: a transform that returns it finishes when the channel closes, and a
+     * runner whose processors never finish never ends the pipeline. It has to be
+     * the future of the reader that is actually pushed to, not one of the wrapper
+     * that {@link IReader.Iter#transform} builds — nothing ever completes that one.
+     */
+    @Test
+    void stringsEndWhenTheChannelCloses() throws Exception {
+        var reader = reader();
+        var end = reader.strings().on((String s) -> {
+        });
+
+        reader.close();
+
+        end.get(5, TimeUnit.SECONDS);
+    }
+
     @Test
     void emptyPayloadDecodesToAnEmptyString() throws Exception {
         var reader = reader();

@@ -148,6 +148,14 @@ public class Runner implements StreamObserver<ToRunner> {
      */
     private final RunnerObserver observer;
 
+    /**
+     * Asked whether a jar is already on this machine before it is downloaded.
+     *
+     * {@link JarResolver#NONE} outside server mode, so the CLI keeps fetching
+     * every jar exactly the way it always did.
+     */
+    private final JarResolver jarResolver;
+
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete) {
         this(stub, uri, onComplete, RunnerObserver.NOOP);
     }
@@ -161,9 +169,25 @@ public class Runner implements StreamObserver<ToRunner> {
      * @param observer   told about every message that goes over a channel
      */
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete, RunnerObserver observer) {
+        this(stub, uri, onComplete, observer, JarResolver.NONE);
+    }
+
+    /**
+     * Builds a runner that reports its traffic and can load jars off the disk it
+     * is already serving them from.
+     *
+     * @param stub        the connection to the orchestrator
+     * @param uri         identifying this runner
+     * @param onComplete  run when this runner is done and has released everything
+     * @param observer    told about every message that goes over a channel
+     * @param jarResolver asked for a local file before a jar is downloaded
+     */
+    public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete, RunnerObserver observer,
+            JarResolver jarResolver) {
         this.uri = uri;
         this.onComplete = onComplete;
         this.observer = observer;
+        this.jarResolver = jarResolver;
         this.stub = stub;
         this.logger = this.createLogger(uri, "cli");
         this.mapper = new ObjectMapper();
@@ -892,6 +916,13 @@ public class Runner implements StreamObserver<ToRunner> {
      * @throws Exception when the jar cannot be reached or read
      */
     private LoadedJar load(String jar, Logger logger) throws Exception {
+        var local = this.localCopyOf(jar, logger);
+        if (local != null) {
+            // Not ours to delete: it was on this machine before this runner existed
+            logger.info("Loading " + jar + " from " + local);
+            return new LoadedJar(new URLClassLoader(new URL[] { local.toUri().toURL() }), null);
+        }
+
         URL jarUrl = new URI(jar).toURL();
 
         Path jarPath;
@@ -926,6 +957,26 @@ public class Runner implements StreamObserver<ToRunner> {
 
         // Use local URLClassLoader
         return new LoadedJar(new URLClassLoader(new URL[] { jarPath.toUri().toURL() }), downloaded);
+    }
+
+    /**
+     * Asks the resolver whether this jar is already on this machine.
+     *
+     * Guarded: a resolver that throws may cost this processor a shortcut, it may
+     * not cost it its jar. Whatever went wrong, the download path is still there
+     * and is what the CLI has always done.
+     *
+     * @param jar    URL of the jar
+     * @param logger to report a resolver that misbehaved on
+     * @return the local file, or null when there is none to use
+     */
+    private Path localCopyOf(String jar, Logger logger) {
+        try {
+            return this.jarResolver.resolve(jar).orElse(null);
+        } catch (Throwable t) {
+            logger.warning("Could not map " + jar + " onto a local file, downloading it instead: " + t);
+            return null;
+        }
     }
 
     /**

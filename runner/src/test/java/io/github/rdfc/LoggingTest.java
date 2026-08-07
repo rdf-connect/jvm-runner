@@ -1,6 +1,7 @@
 package io.github.rdfc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -104,14 +105,36 @@ class LoggingTest {
 
     /** The JDK's own configuration installs one, and it prints the same records. */
     @Test
-    void initTakesOverFromAnotherConsoleHandler() {
+    void initTakesOverFromTheDefaultConsoleHandler() {
         var jdkDefault = new ConsoleHandler();
         this.root.addHandler(jdkDefault);
 
         Logging.init("info");
 
-        assertEquals(1, this.consoles().size());
-        assertTrue(this.consoles().get(0) != jdkDefault, "the pre-existing console handler prints everything twice");
+        assertFalse(Arrays.asList(this.root.getHandlers()).contains(jdkDefault),
+                "the default console handler prints everything twice");
+    }
+
+    /**
+     * The policy is to replace the JDK's <em>default</em> console handler, not
+     * every console handler there is: a subclass carries somebody's formatter,
+     * level or filter, and that is a deliberate choice.
+     */
+    @Test
+    void initLeavesACustomConsoleHandlerAlone() {
+        var mine = new CustomConsole();
+        this.root.addHandler(mine);
+
+        Logging.init("info");
+
+        assertTrue(Arrays.asList(this.root.getHandlers()).contains(mine),
+                "a console handler somebody subclassed on purpose was removed");
+        // Ours is installed next to it, so the runner still has its own output
+        assertEquals(1, this.consoles().stream().filter(handler -> handler != mine).count());
+    }
+
+    /** Somebody's own console handler, which is not the JDK's default shape. */
+    private static final class CustomConsole extends ConsoleHandler {
     }
 
     /** Whoever installed those wants them, and they are not consoles. */
@@ -139,14 +162,44 @@ class LoggingTest {
 
             Logging.init("debug");
             assertEquals(Level.INFO, netty.getLevel());
-
-            // At info and up they are quiet by themselves, and pinning them would
-            // take away a level somebody set by hand
-            netty.setLevel(Level.FINEST);
-            Logging.init("info");
-            assertEquals(Level.FINEST, netty.getLevel());
         } finally {
             netty.setLevel(was);
+        }
+    }
+
+    /** At info and up they are quiet by themselves, so nothing is pinned. */
+    @Test
+    void theNoisyLibrariesAreLeftAloneAtInfo() {
+        var netty = Logger.getLogger("io.netty");
+        var was = netty.getLevel();
+        try {
+            netty.setLevel(null);
+
+            Logging.init("info");
+
+            assertNull(netty.getLevel(), "a level was forced on a library that is quiet anyway");
+        } finally {
+            netty.setLevel(was);
+        }
+    }
+
+    /**
+     * A level somebody set by hand — in a logging.properties or in code — is
+     * their choice, in either direction. Somebody debugging gRPC itself asked for
+     * exactly this.
+     */
+    @Test
+    void aLevelSetByHandOnANoisyLibrarySurvives() {
+        var grpc = Logger.getLogger("io.grpc");
+        var was = grpc.getLevel();
+        try {
+            grpc.setLevel(Level.FINEST);
+
+            Logging.init("debug");
+
+            assertEquals(Level.FINEST, grpc.getLevel(), "a hand-configured level was overwritten");
+        } finally {
+            grpc.setLevel(was);
         }
     }
 

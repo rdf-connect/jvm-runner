@@ -5,9 +5,9 @@ import java.io.StringWriter;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Formatter;
 import java.util.logging.Handler;
@@ -50,14 +50,17 @@ public final class Logging {
     private static final String[] NOISY = { "io.grpc", "io.netty" };
 
     /**
-     * Holds the loggers of {@link #NOISY}.
+     * Holds the loggers of {@link #NOISY} that were pinned.
      *
      * The LogManager only holds loggers weakly, and this runs before netty or
      * gRPC has loaded a single class, so at that moment nothing else holds them
      * at all: collected and re-created, they would come back with no level and
      * inherit the root's again.
+     *
+     * A set, and {@link Logger} does not override {@code equals}, so this is
+     * identity: repeated {@link #init} calls cannot make it grow without bound.
      */
-    private static final List<Logger> pinned = new ArrayList<>();
+    private static final Set<Logger> pinned = new LinkedHashSet<>();
 
     private Logging() {
     }
@@ -86,25 +89,31 @@ public final class Logging {
         var root = Logger.getLogger("");
         root.setLevel(effective);
 
-        // Only ever raised, never lowered: at info and above these two are quiet
-        // anyway, and pinning them then would take away a level somebody set by
-        // hand in a logging.properties
+        // Only below info, because at info and above these two are quiet anyway,
+        // and only for a logger that has no level of its own: one that does was
+        // configured by hand — in a logging.properties, or in code — and that
+        // choice stands, in either direction.
         if (effective.intValue() < Level.INFO.intValue()) {
             for (String noisy : NOISY) {
                 var logger = Logger.getLogger(noisy);
-                logger.setLevel(Level.INFO);
-                pinned.add(logger);
+                if (logger.getLevel() == null) {
+                    logger.setLevel(Level.INFO);
+                    pinned.add(logger);
+                }
             }
         }
 
-        // Any console handler that is not ours prints the same records a second
-        // time — the JDK's default configuration installs one. Handlers that are
-        // not consoles belong to whoever installed them and are left alone.
+        // Policy: we replace the JDK default console handler; custom subclasses
+        // are left alone. The default one prints every record a second time, and
+        // this runner owns its console output — but a ConsoleHandler somebody
+        // subclassed is a deliberate choice (a formatter, a level, a filter of
+        // their own), so only the exact JDK shape goes. Handlers that are not
+        // consoles at all are never touched.
         RunnerConsoleHandler ours = null;
         for (Handler handler : root.getHandlers()) {
             if (handler instanceof RunnerConsoleHandler) {
                 ours = (RunnerConsoleHandler) handler;
-            } else if (handler instanceof ConsoleHandler) {
+            } else if (handler.getClass() == ConsoleHandler.class) {
                 root.removeHandler(handler);
             }
         }
@@ -133,8 +142,19 @@ public final class Logging {
      *
      * The names are winston's, so they are the same ones the js- and py-runners
      * accept. {@code http} has no counterpart here and is treated as
-     * {@code info}; {@code verbose} and {@code debug} both open up the FINE
-     * range, which is where {@link GrpcLogHandler} maps them back from.
+     * {@code info}.
+     *
+     * <b>This table is not the exact inverse of
+     * {@link GrpcLogHandler#levelToString}, and cannot be.</b> Here both
+     * {@code verbose} and {@code debug} open up the FINE range; there, FINE maps
+     * back to {@code debug} and FINER to {@code verbose}. The two orderings
+     * disagree: winston counts {@code verbose} as <em>less</em> verbose than
+     * {@code debug}, java.util.logging counts FINER as <em>more</em> verbose than
+     * FINE, so no single pair of maps honours both. This side errs on the safe
+     * one — asking for either name turns FINE on — because the other side is what
+     * the orchestrator is shown and may not start renaming levels. The visible
+     * consequence: {@code LOG_LEVEL=verbose} does not put FINER records on the
+     * console.
      *
      * @param name the level name, may be null or empty
      * @return the level, or null when the name is not one we know. Null and empty

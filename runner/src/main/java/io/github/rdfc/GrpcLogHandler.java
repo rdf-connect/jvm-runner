@@ -50,6 +50,14 @@ public class GrpcLogHandler extends Handler
      * mapping exactly as they always did. (`http` has no natural java.util.logging
      * counterpart, so it is never produced.)
      *
+     * <b>Not the exact inverse of {@link Logging#parse}, and cannot be.</b> There,
+     * both {@code verbose} and {@code debug} open up the FINE range; here FINE
+     * maps back to {@code debug} and FINER to {@code verbose}. Winston counts
+     * {@code verbose} as <em>less</em> verbose than {@code debug}, while
+     * java.util.logging counts FINER as <em>more</em> verbose than FINE, so no
+     * single pair of maps honours both orderings. This side stays as it is: it is
+     * what the orchestrator is shown.
+     *
      * @param level the level of the record, may be null
      * @return the matching orchestrator level, never null
      */

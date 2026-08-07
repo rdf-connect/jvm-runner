@@ -85,8 +85,24 @@ public class Writer extends IWriter {
     }
 
     /**
+     * No acknowledgement is coming anymore, because the runner is being torn down.
+     *
+     * Whoever is producing on this channel is waiting for the future that the
+     * acknowledgement would have completed, so it is failed instead: a producer
+     * that keeps waiting keeps its thread and the runner's teardown pointless.
+     *
+     * @param error what ended the runner
+     */
+    void fail(Throwable error) {
+        var pending = this.nextProcessed.getAndSet(null);
+        if (pending != null) {
+            pending.completeExceptionally(error);
+        }
+    }
+
+    /**
      * A processed message was received, let the previous sending chunk complete.
-     * 
+     *
      * @param sequenceNumber that is processed
      */
     public void processed(int sequenceNumber) {

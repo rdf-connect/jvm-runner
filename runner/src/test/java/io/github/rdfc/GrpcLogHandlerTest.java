@@ -12,6 +12,8 @@ import java.util.logging.LogRecord;
 
 import org.junit.jupiter.api.Test;
 
+import com.google.protobuf.Empty;
+
 import io.grpc.stub.StreamObserver;
 import rdfc.Service.LogMessage;
 
@@ -111,5 +113,40 @@ class GrpcLogHandlerTest {
 
         assertEquals(1, stream.sent.size());
         assertEquals("error", stream.sent.get(0).getLevel());
+    }
+
+    /**
+     * A record does not have to carry a message — logging a bare Throwable makes
+     * one that does not — and the protobuf setter does not take null.
+     */
+    @Test
+    void publishingARecordWithoutAMessageDoesNotThrow() {
+        var stream = new CapturingStream();
+        var handler = new GrpcLogHandler(stream, "http://example.org/runner");
+
+        var record = new LogRecord(Level.WARNING, null);
+
+        assertDoesNotThrow(() -> handler.publish(record));
+
+        assertEquals(1, stream.sent.size());
+        assertEquals("", stream.sent.get(0).getMsg());
+    }
+
+    /**
+     * This is the response side of the log stream. None of it may throw — it runs
+     * on a gRPC callback thread, where an exception takes the connection down —
+     * and once the stream is gone there is nothing left to log on.
+     */
+    @Test
+    void theResponseSideNeverThrows() {
+        var stream = new CapturingStream();
+        var handler = new GrpcLogHandler(stream, "http://example.org/runner");
+
+        assertDoesNotThrow(() -> handler.onNext(Empty.getDefaultInstance()));
+        assertDoesNotThrow(() -> handler.onError(new IllegalStateException("the log stream dropped")));
+        assertDoesNotThrow(() -> handler.onCompleted());
+
+        handler.publish(new LogRecord(Level.SEVERE, "boom"));
+        assertEquals(0, stream.sent.size(), "kept sending on a log stream that is gone");
     }
 }

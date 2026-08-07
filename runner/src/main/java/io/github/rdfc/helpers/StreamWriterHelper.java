@@ -96,9 +96,22 @@ public class StreamWriterHelper extends Stream<ByteString>
         }
     }
 
+    /**
+     * The stream carrying this message failed.
+     *
+     * Two futures can have somebody waiting on them: the one the next
+     * ReceivingStreamControl would complete, which is what {@link #chunk} handed to
+     * the producer, and the one {@link #close} waits on. Both are failed — a
+     * producer that keeps waiting for a control message on a dead stream never
+     * finishes, and the phase it belongs to never ends.
+     */
     @Override
     public void onError(Throwable t) {
-        throw new UnsupportedOperationException("Unimplemented method 'onError'");
+        this.logger.severe("The stream message failed: " + Errors.describe(t));
+
+        // Both are no-ops when nothing was waiting on them
+        this.nextProcessed.get().completeExceptionally(t);
+        this.acknowledged.completeExceptionally(t);
     }
 
     @Override

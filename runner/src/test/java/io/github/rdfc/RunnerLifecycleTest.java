@@ -341,7 +341,10 @@ class RunnerLifecycleTest {
         assertEquals(channel, ack.getChannel());
         assertEquals(7, ack.getGlobalSequenceNumber());
         assertTrue(ack.hasError());
-        assertTrue(ack.getError().contains("consumer blew up"), "the ack did not carry the error: " + ack.getError());
+        // The failure travelled here through a CompletableFuture, so it arrived
+        // wrapped in a CompletionException. The orchestrator shows this string to a
+        // user, so it carries the cause and nothing else.
+        assertEquals("consumer blew up", ack.getError());
     }
 
     @Test

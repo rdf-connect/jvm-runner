@@ -106,15 +106,25 @@ public class GrpcLogHandler extends Handler
         this.entity = entity;
     }
 
+    /**
+     * Set once the log stream failed: there is nothing to send on anymore, and
+     * every attempt would raise another failure to log.
+     */
+    private volatile boolean broken = false;
+
     @Override
     public void publish(LogRecord record) {
-        if (!isLoggable(record)) {
+        if (this.broken || !isLoggable(record)) {
             return;
         }
 
+        // A record may carry no message at all (a bare Throwable, for instance),
+        // and the protobuf setter does not take null
+        var text = record.getMessage();
+
         var msg = LogMessage.newBuilder()
                 .setLevel(levelToString(record.getLevel()))
-                .setMsg(record.getMessage());
+                .setMsg(text != null ? text : "");
 
         msg.addEntities(uri);
         for (var e : entity) {
@@ -140,20 +150,30 @@ public class GrpcLogHandler extends Handler
         this.stream.onCompleted();
     }
 
-    // This is only a sending stream, we don't expect incoming messages
+    // This is only a sending stream, we don't expect incoming messages.
+    //
+    // None of these three may throw, and none of them may log through a Logger
+    // either: this handler *is* where logging ends up, so that would come straight
+    // back in here (and, on a stream that just died, keep failing). They write to
+    // stderr, which is the only place left.
+
     @Override
     public void onNext(Empty value) {
-        throw new UnsupportedOperationException("Unimplemented method 'onNext'");
+        // Nothing is expected on this stream, but an orchestrator that sends
+        // something anyway is not a reason to fall over
     }
 
     @Override
     public void onError(Throwable t) {
-        throw new UnsupportedOperationException("Unimplemented method 'onError'");
+        // The log stream died. Everything logged from here on is dropped, sending
+        // it would only raise the same failure again.
+        this.broken = true;
+        System.err.println("The log stream to the orchestrator failed: " + t);
     }
 
     @Override
     public void onCompleted() {
-        throw new UnsupportedOperationException("Unimplemented method 'onCompleted'");
+        this.broken = true;
     }
 
     public static Logger createLogger(RunnerGrpc.RunnerStub stub, String uri, String... entities) {

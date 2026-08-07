@@ -18,6 +18,7 @@ import io.grpc.Channel;
 import io.grpc.ClientCall;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
+import io.grpc.Status;
 import rdfc.RunnerGrpc;
 
 /**
@@ -163,6 +164,60 @@ class FakeOrchestrator extends Channel {
         call.respond(response);
     }
 
+    /**
+     * Breaks the call on this method, the way a connection that drops does.
+     *
+     * The runner's observer for that method sees an onError. Delivered on the
+     * delivery thread, so it lands where a real transport would put it.
+     *
+     * @param <ReqT>      request type of the method
+     * @param <RespT>     response type of the method
+     * @param method      the method whose call breaks
+     * @param description what went wrong, shows up in the status
+     */
+    <ReqT, RespT> void fail(MethodDescriptor<ReqT, RespT> method, String description) {
+        this.close(method, Status.UNAVAILABLE.withDescription(description));
+    }
+
+    /**
+     * Closes the call on this method the orderly way: the runner's observer for it
+     * sees an onCompleted.
+     *
+     * @param <ReqT>  request type of the method
+     * @param <RespT> response type of the method
+     * @param method  the method whose call is closed
+     */
+    <ReqT, RespT> void complete(MethodDescriptor<ReqT, RespT> method) {
+        this.close(method, Status.OK);
+    }
+
+    private <ReqT, RespT> void close(MethodDescriptor<ReqT, RespT> method, Status status) {
+        this.onDeliveryThread(method, () -> {
+            var call = this.calls.get(method.getFullMethodName());
+            if (call == null) {
+                throw new IllegalStateException("no call was made on " + method.getFullMethodName());
+            }
+            call.close(status);
+        });
+    }
+
+    /**
+     * Runs the action on the delivery thread and waits for it, turning whatever it
+     * threw into a failure of this test rather than of a background thread.
+     */
+    private void onDeliveryThread(MethodDescriptor<?, ?> method, Runnable action) {
+        try {
+            this.delivery.submit(action).get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("delivering on " + method.getFullMethodName() + " failed", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("delivering on " + method.getFullMethodName() + " timed out", e);
+        }
+    }
+
     private void record(String method, Object message) {
         this.sent.computeIfAbsent(method, _key -> Collections.synchronizedList(new ArrayList<>())).add(message);
 
@@ -181,11 +236,19 @@ class FakeOrchestrator extends Channel {
         }
 
         void respond(RespT message) {
+            this.listener().onMessage(message);
+        }
+
+        void close(Status status) {
+            this.listener().onClose(status, new Metadata());
+        }
+
+        private Listener<RespT> listener() {
             var current = this.listener;
             if (current == null) {
                 throw new IllegalStateException("call on " + this.method + " was never started");
             }
-            current.onMessage(message);
+            return current;
         }
 
         @Override

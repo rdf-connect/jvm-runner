@@ -8,8 +8,10 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.*;
@@ -17,6 +19,7 @@ import java.util.function.Supplier;
 
 import java.util.logging.*;
 
+import io.github.rdfc.helpers.Errors;
 import io.github.rdfc.helpers.StreamObserverWrapper;
 import io.github.rdfc.helpers.StreamReaderHelper;
 import io.github.rdfc.json.ChannelHandlerModule;
@@ -62,6 +65,26 @@ public class Runner implements StreamObserver<ToRunner> {
     private final Map<String, CompletableFuture<Void>> initialized = new ConcurrentHashMap<>();
 
     /**
+     * Every future this runner is still waiting for a processor to complete: the
+     * init, transform and produce of each of them.
+     *
+     * They belong to the processors, so this runner cannot make them finish, but on
+     * teardown it can stop waiting for them — see {@link #finish}. Without that, a
+     * processor blocked on a channel that will never deliver anything again keeps
+     * its continuation, and so this runner, alive forever.
+     */
+    private final Set<CompletableFuture<?>> inFlight = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Per jar URL the class loader that was built for it, so several processors out
+     * of the same jar download and load that jar exactly once.
+     *
+     * Guarded by its own monitor rather than concurrent, because filling an entry
+     * downloads a file and that may not happen twice — see {@link #classLoaderFor}.
+     */
+    private final Map<String, LoadedJar> jars = new HashMap<>();
+
+    /**
      * Mapper used to deserialize the config for each processor.
      */
     protected final ObjectMapper mapper;
@@ -74,6 +97,22 @@ public class Runner implements StreamObserver<ToRunner> {
     private final Runnable onComplete;
     private final Logger logger;
 
+    /**
+     * Completes when this runner is done: normally when every processor finished,
+     * exceptionally when the connection to the orchestrator ended before that.
+     */
+    private final CompletableFuture<Void> completion = new CompletableFuture<>();
+
+    /**
+     * Whether this runner already ended.
+     *
+     * All three ways of ending — the last processor finishing, a broken
+     * connection, an orchestrator that closes the stream — can happen at the same
+     * moment, and the two latter ones arrive on gRPC callback threads. Only the
+     * caller that flips this tears anything down.
+     */
+    private final AtomicBoolean finished = new AtomicBoolean(false);
+
     protected final String uri;
 
     public Runner(RunnerGrpc.RunnerStub stub, String uri, Runnable onComplete) {
@@ -84,18 +123,39 @@ public class Runner implements StreamObserver<ToRunner> {
         }
 
         this.uri = uri;
-        this.logger = GrpcLogHandler.createLogger(stub, uri, "cli");
-        this.stream = new StreamObserverWrapper<>(stub.connect(this), "main stream", this.logger);
-
         this.onComplete = onComplete;
         this.stub = stub;
+        this.logger = GrpcLogHandler.createLogger(stub, uri, "cli");
         this.mapper = new ObjectMapper();
         this.mapper.registerModule(new ChannelHandlerModule(this, this.logger));
         // The mapper can ignore properties like `@type`, `@context` from JSON-LD
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
+        // Last, because this hands `this` to the transport: from here on incoming
+        // messages can be delivered, and they may only find fields that are set.
+        //
+        // What this cannot cover is a subclass: its own fields are initialized after
+        // this constructor returns, so a message delivered from inside this call
+        // would find them empty. No transport this runner uses delivers anything
+        // that early — the connect() only opens the call — so this stays a
+        // constructor rather than a factory that would have to be called by hand.
+        this.stream = new StreamObserverWrapper<>(stub.connect(this), "main stream", this.logger);
+
         this.sendIdentify();
         this.logger.info("JVM runner identified");
+    }
+
+    /**
+     * Completes when this runner is done and has released everything it held.
+     *
+     * It completes normally when every processor finished, and exceptionally when
+     * the orchestrator connection ended before that — which is a normal event, not
+     * a reason to bring the JVM down.
+     *
+     * @return the future, the same one on every call
+     */
+    public CompletableFuture<Void> completion() {
+        return this.completion;
     }
 
     public void setReader(String uri, Reader reader) {
@@ -128,8 +188,78 @@ public class Runner implements StreamObserver<ToRunner> {
         // One atomic step, so exactly one caller can ever observe the zero
         var v = this.awaiting.addAndGet(-callbacks);
         if (v == 0) {
-            this.stream.onCompleted();
-            this.onComplete.run();
+            this.finish(null);
+        }
+    }
+
+    /**
+     * Ends this runner, exactly once.
+     *
+     * Every way of ending goes through here: the last processor handing its
+     * callback back, a connection that broke, an orchestrator that closed the
+     * stream, and the cancellations this very method causes. The first caller does
+     * the work, everyone after it returns without touching anything — the runner
+     * has already let go of the resources they would want to release.
+     *
+     * Nothing in here may throw: it runs on gRPC callback threads, where an
+     * exception takes the connection down (and in server mode, would take a
+     * connection down that is merely one of many).
+     *
+     * @param error what ended this runner, or null when it simply finished its work
+     */
+    private void finish(Throwable error) {
+        if (!this.finished.compareAndSet(false, true)) {
+            return;
+        }
+
+        if (error == null) {
+            // Only on the orderly end: on a broken connection there is nothing left
+            // to say goodbye on, and half-closing a dead call throws.
+            this.quietly("completing the stream", this.stream::onCompleted);
+        }
+
+        // The processors' futures are handed a failure, so nobody chained on them
+        // keeps waiting for an answer that is not coming anymore
+        var reason = error != null ? error : new IllegalStateException("the runner finished");
+
+        this.quietly("failing the pending inits", () -> this.initialized.values()
+                .forEach(init -> init.completeExceptionally(reason)));
+        this.quietly("cancelling the in-flight phases", () -> this.inFlight.forEach(phase -> phase.cancel(true)));
+        this.quietly("failing the pending acknowledgements",
+                () -> this.writers.values().forEach(writer -> writer.fail(reason)));
+        // Closing the readers ends the iterators the processors consume, so they see
+        // an end of stream instead of waiting for data that will never arrive
+        this.quietly("closing the readers", () -> this.readers.values().forEach(Reader::close));
+        this.quietly("closing the loaded jars", this::closeJars);
+        this.quietly("running the completion callback", this.onComplete::run);
+
+        if (error != null) {
+            this.completion.completeExceptionally(error);
+        } else {
+            this.completion.complete(null);
+        }
+    }
+
+    /**
+     * Runs one step of the teardown, whatever it does.
+     *
+     * A step that throws may not stop the steps behind it: the whole point of the
+     * teardown is that everything is released, and the very last one of them
+     * completes the future somebody is waiting on.
+     *
+     * @param what a description of the step, for the log
+     * @param step the step to run
+     */
+    private void quietly(String what, Runnable step) {
+        try {
+            step.run();
+        } catch (Throwable t) {
+            try {
+                this.logger.warning("Tearing this runner down: " + what + " failed: " + t);
+            } catch (Throwable ignored) {
+                // The logger itself talks to the orchestrator, so it can fail too
+                t.printStackTrace(System.err);
+            }
         }
     }
 
@@ -246,6 +376,11 @@ public class Runner implements StreamObserver<ToRunner> {
      * been handled.
      * This is either a _normal_ message or a streaming message
      * 
+     * Both the plain and the streaming path end up here, so both report their
+     * failures the same way: unwrapped, because the orchestrator shows this string
+     * to a user and "java.util.concurrent.CompletionException: ..." tells that user
+     * nothing.
+     *
      * @param channel              that carried the message
      * @param globalSequenceNumber identifier of the message (per channel)
      * @param error                the exception that made handling the message
@@ -256,9 +391,7 @@ public class Runner implements StreamObserver<ToRunner> {
         processed.setGlobalSequenceNumber(globalSequenceNumber);
         processed.setChannel(channel);
         if (error != null) {
-            // Some exceptions carry no message, then fall back on the type name
-            var cause = error.getMessage();
-            processed.setError(cause != null ? cause : error.toString());
+            processed.setError(Errors.describe(error));
         }
         var orchestratorMessage = FromRunner.newBuilder().setProcessed(processed.build());
         this.stream.onNext(orchestratorMessage.build());
@@ -291,7 +424,7 @@ public class Runner implements StreamObserver<ToRunner> {
             Processor<?> processor = this.startProc(proc, procLogger);
             this.initialized.put(uri, initialized);
 
-            processor.init().thenAccept(_void -> {
+            this.awaited(processor.init()).thenAccept(_void -> {
                 // Reported before transform is started: from the moment transform runs
                 // its completion decreases the counter, so a failure after that point
                 // may no longer hand the two callbacks back.
@@ -301,7 +434,7 @@ public class Runner implements StreamObserver<ToRunner> {
                 // future takes the normal transform-failure path. Letting it escape
                 // here would fail the init future and report this processor a second
                 // time, contradicting the ProcessorInitialized just sent.
-                phase(processor::transform).whenComplete((output, e) -> {
+                this.awaited(phase(processor::transform)).whenComplete((output, e) -> {
                     if (e != null) {
                         this.logger.severe("Processor " + uri + " transform exception: " + e);
                         e.printStackTrace(System.err);
@@ -362,7 +495,7 @@ public class Runner implements StreamObserver<ToRunner> {
      * @param init future that completes when this processor is initialized
      */
     private void produceWhenInitialized(String uri, CompletableFuture<Void> init) {
-        init.thenRun(() -> phase(() -> this.processors.get(uri).produce()).whenComplete((output, e) -> {
+        init.thenRun(() -> this.awaited(phase(() -> this.processors.get(uri).produce())).whenComplete((output, e) -> {
             if (e != null) {
                 this.logger.severe("Processor " + uri + " produce exception: " + e);
                 e.printStackTrace(System.err);
@@ -386,6 +519,22 @@ public class Runner implements StreamObserver<ToRunner> {
      * @return the phase's future, a failed one when it threw, a completed one when
      *         it returned null
      */
+    /**
+     * Remembers a processor's future for as long as this runner waits for it, so a
+     * teardown can stop waiting for it.
+     *
+     * @param <T>   what the phase hands back
+     * @param phase the future to wait for
+     * @return that very same future
+     */
+    private <T> CompletableFuture<T> awaited(CompletableFuture<T> phase) {
+        this.inFlight.add(phase);
+        // Kept short: a pipeline that runs for hours would otherwise collect every
+        // phase that ever ran
+        phase.whenComplete((output, e) -> this.inFlight.remove(phase));
+        return phase;
+    }
+
     private static CompletableFuture<?> phase(Supplier<CompletableFuture<?>> phase) {
         try {
             var out = phase.get();
@@ -408,14 +557,39 @@ public class Runner implements StreamObserver<ToRunner> {
         return processor;
     }
 
+    /**
+     * The connection to the orchestrator broke.
+     *
+     * In server mode this is an everyday event — an orchestrator went away — so it
+     * tears this one runner down and leaves the JVM alone.
+     */
     @Override
     public void onError(Throwable t) {
-        throw new UnsupportedOperationException("Unimplemented method 'onError'");
+        // Warning, not severe: losing the connection is expected, and severe would
+        // try to report it over the very connection that just died
+        this.logger.warning("The connection to the orchestrator failed: " + Errors.describe(t));
+        this.finish(t);
     }
 
+    /**
+     * The orchestrator closed the stream.
+     *
+     * When this runner already finished its work, this is just the orderly end of
+     * the connection and the completion future is long since completed. When it
+     * has not, the orchestrator went away before this runner was done, and that is
+     * a failure — the same choice the js-runner makes. Whoever waits on
+     * {@link #completion()} has to be able to tell "ran everything" apart from
+     * "was cut short", and the counter says the work was not finished.
+     */
     @Override
     public void onCompleted() {
-        this.logger.severe("onCompleted maybe I should do something");
+        if (this.finished.get()) {
+            this.logger.fine("The orchestrator closed the stream");
+            return;
+        }
+
+        this.logger.warning("The orchestrator closed the stream before this runner completed");
+        this.finish(new IllegalStateException("stream ended before runner completed"));
     }
 
     /**
@@ -468,25 +642,71 @@ public class Runner implements StreamObserver<ToRunner> {
     }
 
     /**
-     * Configuration class that each processor implements.
-     * It contains the jar location of the processor and the class that implements
-     * the processor _in_ this Jar.
+     * The class loader for a jar, and the copy of that jar to clean up afterwards.
      */
-    private static class Config {
-        public String jar;
-        public String clazz;
+    private static final class LoadedJar {
+        /** Loads the classes out of the jar. */
+        final URLClassLoader loader;
+        /**
+         * The temporary copy that was downloaded for it, null when the jar was
+         * already on this machine and so is not ours to delete.
+         */
+        final Path downloaded;
 
-        Processor<?> loadClass(Runner runner, String arguments, Logger logger) throws Exception {
-            URL jarUrl = new URI(this.jar).toURL();
+        LoadedJar(URLClassLoader loader, Path downloaded) {
+            this.loader = loader;
+            this.downloaded = downloaded;
+        }
+    }
+
+    /**
+     * The class loader for a jar, downloading and building it the first time this
+     * runner is asked for it.
+     *
+     * A pipeline usually runs several processors out of the same jar. Loading that
+     * jar once per processor downloads the same file again and again and hands
+     * every processor its own copies of the same classes, so the answer is cached
+     * per runner — per runner, and not statically, because the loaders and the
+     * downloads are released when this runner is torn down.
+     *
+     * Whole method under one lock: two processors out of the same jar are handled
+     * one after the other, and downloading the same file twice in parallel is
+     * exactly what this is here to prevent.
+     *
+     * @param jar    URL of the jar
+     * @param logger to report the download on
+     * @return the loader for that jar
+     * @throws Exception when the jar cannot be reached or read
+     */
+    URLClassLoader classLoaderFor(String jar, Logger logger) throws Exception {
+        synchronized (this.jars) {
+            if (this.finished.get()) {
+                // The teardown already closed everything in here, a loader made now
+                // would never be closed again
+                throw new IllegalStateException("this runner was torn down, " + jar + " is not loaded anymore");
+            }
+
+            var known = this.jars.get(jar);
+            if (known != null) {
+                logger.fine("Reusing the class loader for " + jar);
+                return known.loader;
+            }
+
+            URL jarUrl = new URI(jar).toURL();
 
             Path jarPath;
+            Path downloaded = null;
             // if the jar is still remote, download the entire Jar to a temporary location
             // Otherwise, just point to the physical jar location.
             if (jarUrl.getProtocol().equalsIgnoreCase("http") || jarUrl.getProtocol().equalsIgnoreCase("https")) {
                 // Remote JAR, download it
-                logger.info("Downloading JAR from " + this.jar);
+                logger.info("Downloading JAR from " + jar);
                 // Download JAR to temp dir
                 jarPath = Files.createTempFile("remote-lib", ".jar");
+                // Belt and braces: the teardown deletes this, and should the runner
+                // never be torn down the JVM still cleans it up on the way out
+                jarPath.toFile().deleteOnExit();
+                downloaded = jarPath;
                 try (InputStream in = jarUrl.openStream()) {
                     Files.copy(in, jarPath, StandardCopyOption.REPLACE_EXISTING);
                 }
@@ -497,7 +717,58 @@ public class Runner implements StreamObserver<ToRunner> {
             }
 
             // Use local URLClassLoader
-            URLClassLoader loader = new URLClassLoader(new URL[] { jarPath.toUri().toURL() });
+            var loaded = new LoadedJar(new URLClassLoader(new URL[] { jarPath.toUri().toURL() }), downloaded);
+            this.jars.put(jar, loaded);
+            return loaded.loader;
+        }
+    }
+
+    /**
+     * Closes every class loader this runner built and deletes the jars it
+     * downloaded for them.
+     *
+     * A loader keeps the jar file open, which on Windows means the file cannot be
+     * deleted, and in server mode a runner that comes and goes would otherwise
+     * leave both behind on every connection.
+     */
+    private void closeJars() {
+        synchronized (this.jars) {
+            for (var entry : this.jars.entrySet()) {
+                var loaded = entry.getValue();
+
+                try {
+                    loaded.loader.close();
+                } catch (Exception e) {
+                    this.logger.warning("Could not close the class loader for " + entry.getKey() + ": " + e);
+                }
+
+                if (loaded.downloaded == null) {
+                    continue;
+                }
+
+                try {
+                    Files.deleteIfExists(loaded.downloaded);
+                } catch (Exception e) {
+                    this.logger.warning("Could not delete the downloaded jar " + loaded.downloaded + ": " + e);
+                }
+            }
+
+            this.jars.clear();
+        }
+    }
+
+    /**
+     * Configuration class that each processor implements.
+     * It contains the jar location of the processor and the class that implements
+     * the processor _in_ this Jar.
+     */
+    private static class Config {
+        public String jar;
+        public String clazz;
+
+        Processor<?> loadClass(Runner runner, String arguments, Logger logger) throws Exception {
+            // Shared with every other processor out of this same jar
+            URLClassLoader loader = runner.classLoaderFor(this.jar, logger);
 
             Class<?> clazz = loader.loadClass(this.clazz);
 

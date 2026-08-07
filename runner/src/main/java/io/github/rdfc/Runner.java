@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.*;
+import java.util.function.Supplier;
 
 import java.util.logging.*;
 
@@ -296,7 +297,11 @@ public class Runner implements StreamObserver<ToRunner> {
                 // may no longer hand the two callbacks back.
                 this.sendProcInit(uri, Optional.empty());
 
-                processor.transform().whenComplete((output, e) -> {
+                // Guarded, so a transform that throws instead of returning a failed
+                // future takes the normal transform-failure path. Letting it escape
+                // here would fail the init future and report this processor a second
+                // time, contradicting the ProcessorInitialized just sent.
+                phase(processor::transform).whenComplete((output, e) -> {
                     if (e != null) {
                         this.logger.severe("Processor " + uri + " transform exception: " + e);
                         e.printStackTrace(System.err);
@@ -357,27 +362,37 @@ public class Runner implements StreamObserver<ToRunner> {
      * @param init future that completes when this processor is initialized
      */
     private void produceWhenInitialized(String uri, CompletableFuture<Void> init) {
-        init.thenRun(() -> {
-            CompletableFuture<?> produced;
-            try {
-                produced = this.processors.get(uri).produce();
-            } catch (Throwable t) {
-                // A processor that throws instead of returning a failed future may not
-                // keep this runner from terminating.
-                var failed = new CompletableFuture<Object>();
-                failed.completeExceptionally(t);
-                produced = failed;
+        init.thenRun(() -> phase(() -> this.processors.get(uri).produce()).whenComplete((output, e) -> {
+            if (e != null) {
+                this.logger.severe("Processor " + uri + " produce exception: " + e);
+                e.printStackTrace(System.err);
             }
+            // After the production is finished, check for end
+            this.decreaseAndCheckEnd();
+        }));
+    }
 
-            produced.whenComplete((output, e) -> {
-                if (e != null) {
-                    this.logger.severe("Processor " + uri + " produce exception: " + e);
-                    e.printStackTrace(System.err);
-                }
-                // After the production is finished, check for end
-                this.decreaseAndCheckEnd();
-            });
-        });
+    /**
+     * Calls one of a processor's phases and hands back a future that always
+     * exists, whatever the processor does.
+     *
+     * A phase is written by whoever wrote the processor, so it may well throw
+     * instead of returning a failed future, or hand back null. Both are turned
+     * into an ordinary future here, so every caller has exactly one failure path
+     * and a callback the runner is waiting for can never go missing. A phase that
+     * returns null is taken to have finished right away.
+     *
+     * @param phase the phase to call
+     * @return the phase's future, a failed one when it threw, a completed one when
+     *         it returned null
+     */
+    private static CompletableFuture<?> phase(Supplier<CompletableFuture<?>> phase) {
+        try {
+            var out = phase.get();
+            return out != null ? out : CompletableFuture.completedFuture(null);
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
     }
 
     protected Processor<?> startProc(rdfc.Service.Processor proc, Logger logger) throws Exception {

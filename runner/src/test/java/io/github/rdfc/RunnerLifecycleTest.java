@@ -263,6 +263,57 @@ class RunnerLifecycleTest {
                 "the failure was never reported");
     }
 
+    /**
+     * A transform that throws instead of returning a failed future may not turn
+     * into a second, contradicting ProcessorInitialized: at most one of those may
+     * ever be sent per processor, and the success one already went out.
+     */
+    @Test
+    void aTransformThatThrowsIsNotReportedAsAFailedInit() {
+        var orchestrator = new FakeOrchestrator();
+        var runner = TestRunner.create(orchestrator, "http://example.org/runner/lifecycle-throwing-transform");
+        var processor = runner.register(PROC, new StubProcessor());
+        processor.transformThrows = new RuntimeException("transform blew up");
+
+        runner.onNext(proc(PROC));
+        runner.onNext(start());
+        processor.init.complete(null);
+
+        var reported = initialized(orchestrator);
+        assertEquals(1, reported.size(), "a processor may only be reported as initialized once");
+        assertFalse(reported.get(0).hasError());
+
+        // The throw took the normal transform-failure path, so that callback was
+        // handed back and only the produce is still outstanding
+        assertEquals(1, processor.transformCalls.get());
+        assertEquals(1, runner.awaiting());
+        assertEquals(0, runner.completions.get());
+
+        processor.produce.complete(null);
+        assertEquals(0, runner.awaiting());
+        assertEquals(1, runner.completions.get());
+    }
+
+    /** A phase handing back null counts as one that finished right away. */
+    @Test
+    void aTransformThatReturnsNullCountsAsFinished() {
+        var orchestrator = new FakeOrchestrator();
+        var runner = TestRunner.create(orchestrator, "http://example.org/runner/lifecycle-null-transform");
+        var processor = runner.register(PROC, new StubProcessor());
+        processor.transformReturnsNull = true;
+
+        runner.onNext(proc(PROC));
+        runner.onNext(start());
+        processor.init.complete(null);
+
+        assertEquals(1, initialized(orchestrator).size());
+        assertEquals(1, runner.awaiting());
+
+        processor.produce.complete(null);
+        assertEquals(0, runner.awaiting());
+        assertEquals(1, runner.completions.get());
+    }
+
     @Test
     void theAckOfAFailedMessageCarriesTheError() {
         var orchestrator = new FakeOrchestrator();

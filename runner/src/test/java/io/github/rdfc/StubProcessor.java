@@ -17,6 +17,11 @@ class StubProcessor extends Processor<Object> {
     final AtomicInteger transformCalls = new AtomicInteger();
     final AtomicInteger produceCalls = new AtomicInteger();
 
+    /** When set, transform() throws this instead of returning its future. */
+    volatile RuntimeException transformThrows;
+    /** When set, transform() returns null instead of its future. */
+    volatile boolean transformReturnsNull;
+
     StubProcessor() {
         super(new Object(), Logger.getLogger(StubProcessor.class.getName()));
     }
@@ -30,7 +35,12 @@ class StubProcessor extends Processor<Object> {
     @Override
     public CompletableFuture<?> transform() {
         this.transformCalls.incrementAndGet();
-        return this.transform;
+
+        if (this.transformThrows != null) {
+            throw this.transformThrows;
+        }
+
+        return this.transformReturnsNull ? null : this.transform;
     }
 
     @Override

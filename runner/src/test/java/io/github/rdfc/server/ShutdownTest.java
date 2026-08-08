@@ -10,10 +10,15 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -98,6 +103,73 @@ class ShutdownTest {
             // Reset rather than a clean close; from here that is the same answer
             return true;
         }
+    }
+
+    /**
+     * A shutdown is not a failure, and may not read like one.
+     *
+     * The server used to drop a connection's transport without telling the runner
+     * on it, so every log stream that runner had open died of its own accord a
+     * moment later and each one said so — one failure line per processor, on the
+     * way out of a shutdown that went perfectly. The runner is torn down first
+     * now, which closes those handlers while there is still a channel to
+     * half-close them on, and what arrives afterwards is the routine teardown
+     * status a closed handler stays quiet about.
+     */
+    @Test
+    void shuttingDownDoesNotReportTheLogStreamsAsFailed(@TempDir Path dir) throws Exception {
+        RunnerServer server = new RunnerServer(ServerFixture.config(dir), 0, 0,
+                RunnerServer.MAX_GRPC_CONNECTIONS);
+        server.start();
+
+        Socket orchestrator = new Socket(LOOPBACK, server.boundGrpcPort());
+        orchestrator.setSoTimeout(10_000);
+        orchestrator.getOutputStream().write("http://example.org/runner/quiet\n".getBytes(UTF_8));
+        orchestrator.getOutputStream().flush();
+
+        ServerFixture.await(() -> !server.state().snapshot().isEmpty(), "the runner is registered");
+
+        List<LogRecord> complaints = new ArrayList<>();
+        Handler collector = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                    synchronized (complaints) {
+                        complaints.add(record);
+                    }
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+
+        Logger handlers = Logger.getLogger("io.github.rdfc.GrpcLogHandler");
+        handlers.addHandler(collector);
+        try {
+            server.shutdown();
+        } finally {
+            handlers.removeHandler(collector);
+        }
+
+        synchronized (complaints) {
+            assertEquals(List.of(), messagesOf(complaints),
+                    "a clean shutdown reported its own log streams as failures");
+        }
+        orchestrator.close();
+    }
+
+    private static List<String> messagesOf(List<LogRecord> records) {
+        List<String> out = new ArrayList<>();
+        for (LogRecord record : records) {
+            out.add(record.getMessage());
+        }
+        return out;
     }
 
     /**

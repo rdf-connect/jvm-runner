@@ -57,6 +57,12 @@ public final class Handshake {
      * peer that dribbles one byte just inside the interval hold the connection —
      * and the slot {@link RunnerServer} counts it in — for as long as it takes to
      * reach {@link #MAX_LINE}, which at that rate is well over an hour.
+     *
+     * This covers the IRI line and nothing else. A peer that sends a line and
+     * then goes silent is past this budget and onto the next one: the connection
+     * has {@code RunnerServer.ESTABLISH_MILLIS} to bring its gRPC stream up
+     * before it is evicted. Between them the two bound the whole stretch in which
+     * a connection holds a slot without being a runner.
      */
     static final int TIMEOUT_MILLIS = 5000;
 
@@ -177,8 +183,10 @@ public final class Handshake {
                     "no runner IRI within the handshake timeout");
         }
 
+        // No clamp on the way up: the budget this counts down from is an int
+        // number of milliseconds, so what is left of it cannot outgrow one
         var millis = TimeUnit.NANOSECONDS.toMillis(left);
-        return (int) Math.max(1, Math.min(millis, Integer.MAX_VALUE));
+        return (int) Math.max(1, millis);
     }
 
     private static int indexOfNewline(byte[] buffer, int length) {

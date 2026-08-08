@@ -28,10 +28,13 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -45,6 +48,8 @@ import io.github.rdfc.RunnerObserver;
 import io.github.rdfc.helpers.Errors;
 import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import rdfc.RunnerGrpc;
 
 /**
@@ -86,6 +91,32 @@ public final class RunnerServer implements Closeable {
     /** How long {@link #shutdown()} gives the live connections to end. */
     static final long SHUTDOWN_GRACE_MILLIS = 10_000;
 
+    /**
+     * How long a connection has to bring its gRPC stream up, counted from the end
+     * of the handshake.
+     *
+     * {@link Handshake#TIMEOUT_MILLIS} covers the IRI line and stops there. Past
+     * it the connection is a full slot — a thread, two pumps, a channel — and
+     * nothing else was ever going to take it back: the pumps sit in an untimed
+     * read, {@link #awaitEnd} waits on futures with no deadline, and a channel
+     * that never connects raises nothing. A peer that writes one line and then
+     * says nothing held its slot until this process was restarted, and
+     * {@link #MAX_GRPC_CONNECTIONS} of those closed the server for business.
+     *
+     * So the <em>unestablished</em> phase gets a budget of its own, and a
+     * connection that has not brought its stream up when it runs out is dropped.
+     * Thirty seconds because that is the orchestrator's own budget for connecting
+     * back and identifying: anything shorter would cut off orchestrators that are
+     * merely slow, anything longer is time this server spends holding a slot for a
+     * peer that has already given up.
+     *
+     * <b>Only the unestablished phase.</b> Once the stream is up there is no
+     * deadline at all — pipelines legitimately run for hours — and what is left to
+     * notice a peer that dies silently is the socket's keepalive, which
+     * {@link SocketBridge} turns on.
+     */
+    static final long ESTABLISH_MILLIS = 30_000;
+
     /** What the routing table looks like in the startup line. */
     private static final String ROUTES = "/, /health, /api/state, /dashboard";
 
@@ -115,6 +146,7 @@ public final class RunnerServer implements Closeable {
     private final int grpcBindPort;
     private final int httpBindPort;
     private final int maxConnections;
+    private final long establishMillis;
 
     /** The connections being served, including the ones still in their handshake. */
     private final Set<Connection> live = ConcurrentHashMap.newKeySet();
@@ -122,6 +154,18 @@ public final class RunnerServer implements Closeable {
     private final ExecutorService connections = Executors.newCachedThreadPool(
             daemonThreads("rdfc-connection-"));
     private final ExecutorService requests = Executors.newCachedThreadPool(daemonThreads("rdfc-http-"));
+
+    /**
+     * Fires the establishment checks of every connection.
+     *
+     * One thread for the whole server: a check is a flag read and, in the rare
+     * case that it evicts, a {@link SocketBridge#close()} — milliseconds in
+     * practice, and a bridge that takes its documented worst case only delays the
+     * eviction of another connection that has already been waiting thirty seconds.
+     * A thread per connection parked on a timer is the thing this avoids.
+     */
+    private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor(
+            daemonThreads("rdfc-deadline-"));
 
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopping = new AtomicBoolean();
@@ -159,7 +203,20 @@ public final class RunnerServer implements Closeable {
     }
 
     /**
-     * Visible for testing: the ports actually bound and the connection cap.
+     * As below, with the real establishment deadline.
+     *
+     * @param config         the parsed server configuration
+     * @param grpcBindPort   port to accept orchestrator connections on, 0 for any
+     * @param httpBindPort   port to serve HTTP on, 0 for any
+     * @param maxConnections how many connections are served at once
+     */
+    RunnerServer(ServerConfig config, int grpcBindPort, int httpBindPort, int maxConnections) {
+        this(config, grpcBindPort, httpBindPort, maxConnections, ESTABLISH_MILLIS);
+    }
+
+    /**
+     * Visible for testing: the ports actually bound, the connection cap and the
+     * establishment deadline.
      *
      * A test binds ephemeral ports — the configured ones are somebody's real
      * ports and two tests running at once would fight over them — while the
@@ -168,16 +225,21 @@ public final class RunnerServer implements Closeable {
      * the same reason: proving that the 33rd connection is refused by opening 32
      * of them is a slow way to test a comparison.
      *
-     * @param config         the parsed server configuration
-     * @param grpcBindPort   port to accept orchestrator connections on, 0 for any
-     * @param httpBindPort   port to serve HTTP on, 0 for any
-     * @param maxConnections how many connections are served at once
+     * @param config          the parsed server configuration
+     * @param grpcBindPort    port to accept orchestrator connections on, 0 for any
+     * @param httpBindPort    port to serve HTTP on, 0 for any
+     * @param maxConnections  how many connections are served at once
+     * @param establishMillis how long a connection has to bring its stream up, see
+     *                        {@link #ESTABLISH_MILLIS}. A test that wants to watch
+     *                        a silent peer be evicted would otherwise have to sit
+     *                        still for thirty seconds.
      */
-    RunnerServer(ServerConfig config, int grpcBindPort, int httpBindPort, int maxConnections) {
+    RunnerServer(ServerConfig config, int grpcBindPort, int httpBindPort, int maxConnections, long establishMillis) {
         this.config = config;
         this.grpcBindPort = grpcBindPort;
         this.httpBindPort = httpBindPort;
         this.maxConnections = maxConnections;
+        this.establishMillis = establishMillis;
 
         this.whitelist = Whitelist.build(config.processorConfigs(), LOGGER);
         this.serveRoot = ServeRoot.of(config.configDir(), this.whitelist);
@@ -403,6 +465,7 @@ public final class RunnerServer implements Closeable {
         // socket to close and a registration to undo on the way out
         String id = null;
         SocketBridge bridge = null;
+        AtomicReference<ScheduledFuture<?>> establishment = new AtomicReference<>();
         try {
             id = this.state.registerRunner(connection.host, uri);
             bridge = new SocketBridge(connection.socket, handshake.remainder());
@@ -411,7 +474,17 @@ public final class RunnerServer implements Closeable {
             // Once, and right here: channel() throws after the bridge is closed,
             // and the shutdown may close it at any moment from another thread
             ManagedChannel channel = bridge.channel();
-            this.watchChannel(channel, id);
+
+            // Armed before the channel is watched, so the callback that disarms it
+            // always finds it — and before the runner exists, because constructing
+            // that is what starts the stream this waits for
+            AtomicBoolean established = new AtomicBoolean();
+            establishment.set(this.evictUnlessEstablished(bridge, uri, connection.host, established));
+            this.watchChannel(channel, id, () -> {
+                if (established.compareAndSet(false, true)) {
+                    cancel(establishment.get());
+                }
+            });
 
             // Before the runner exists, not after: constructing it opens the
             // stream, and from that moment the dashboard may be asked what this
@@ -419,6 +492,7 @@ public final class RunnerServer implements Closeable {
             this.state.setStatus(id, State.Status.RUNNING);
             Runner runner = new Runner(RunnerGrpc.newStub(channel), uri, () -> {
             }, this.observerFor(id), ServedJars.of(this.serveRoot, uri));
+            connection.runner = runner;
 
             this.awaitEnd(runner, bridge);
 
@@ -438,6 +512,11 @@ public final class RunnerServer implements Closeable {
             this.markError(id, Errors.describe(t));
             LOGGER.log(Level.WARNING, "Runner connection from " + connection.host + " failed", t);
         } finally {
+            // Whether it fired, was disarmed or never got armed at all: a
+            // connection that is over has no deadline left to miss, and a check
+            // that runs anyway would report an eviction that is not one
+            cancel(establishment.get());
+
             // Null when the registration itself was what failed: there is nothing
             // to move into the history, only a socket to let go of
             if (id != null) {
@@ -448,6 +527,54 @@ public final class RunnerServer implements Closeable {
             } else {
                 closeQuietly(connection.socket, "orchestrator socket");
             }
+        }
+    }
+
+    /**
+     * Schedules the one check that ends a connection which never came up.
+     *
+     * Closing the bridge is all it takes: that completes {@link SocketBridge#done()},
+     * which unblocks {@link #awaitEnd} and puts the connection on the same path an
+     * orchestrator that went away puts it on — the runner is told, the state gets
+     * its history entry and the slot is handed back. Nothing here has to know any
+     * of that.
+     *
+     * A single check rather than a poll: there is exactly one moment worth looking
+     * at, and until it arrives there is nothing to see.
+     *
+     * @param bridge      the transport to drop when the deadline passes
+     * @param uri         of the runner, for the log
+     * @param host        it connected from, for the log
+     * @param established set once the stream came up; the check is a no-op then
+     * @return the scheduled check, or null when this server is stopping and every
+     *         connection is being ended anyway
+     */
+    private ScheduledFuture<?> evictUnlessEstablished(SocketBridge bridge, String uri, String host,
+            AtomicBoolean established) {
+        try {
+            return this.deadlines.schedule(() -> {
+                if (established.get()) {
+                    return;
+                }
+                LOGGER.warning("Runner " + uri + " from " + host + " did not establish its stream within "
+                        + this.establishMillis + " ms; dropping the connection");
+                bridge.close();
+            }, this.establishMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            // A shutdown that got here first, and that ends this connection itself
+            LOGGER.fine("Not watching the establishment of " + uri + ": this server is stopping");
+            return null;
+        }
+    }
+
+    /**
+     * @param scheduled a scheduled check, may be null when none was ever armed
+     */
+    private static void cancel(ScheduledFuture<?> scheduled) {
+        if (scheduled != null) {
+            // Not interrupting: a check that is already closing a bridge has to
+            // finish doing that
+            scheduled.cancel(false);
         }
     }
 
@@ -506,23 +633,36 @@ public final class RunnerServer implements Closeable {
     }
 
     /**
-     * Mirrors a channel's connectivity into the state the dashboard reads.
+     * Mirrors a channel's connectivity into the state the dashboard reads, and
+     * says when it first came up.
      *
      * Re-registered from the callback rather than looped on a thread of its own:
      * a thread per connection parked on a state change is a thread per connection
      * doing nothing.
      *
+     * READY is the signal this server has that a connection is <em>established</em>
+     * without inventing anything on the wire: it means the orchestrator answered
+     * the HTTP/2 preface, so the runner's connect stream is really up. Reported on
+     * every observation and not only on the change, because the callback that
+     * carries it is registered on the state seen a moment earlier, and the channel
+     * may have got there in between.
+     *
      * @param channel the channel of one connection
      * @param id      of the runner on it
+     * @param onReady run whenever the channel is seen READY; must be cheap and
+     *                must not throw
      */
-    private void watchChannel(ManagedChannel channel, String id) {
+    private void watchChannel(ManagedChannel channel, String id, Runnable onReady) {
         try {
             ConnectivityState current = channel.getState(false);
             this.state.setGrpcState(id, current.name());
+            if (current == ConnectivityState.READY) {
+                onReady.run();
+            }
             if (current == ConnectivityState.SHUTDOWN) {
                 return;
             }
-            channel.notifyWhenStateChanged(current, () -> this.watchChannel(channel, id));
+            channel.notifyWhenStateChanged(current, () -> this.watchChannel(channel, id, onReady));
         } catch (Throwable t) {
             // A channel that was shut down under us; the dashboard keeps whatever
             // it last saw, which is a great deal better than a callback thread
@@ -816,6 +956,9 @@ public final class RunnerServer implements Closeable {
 
         this.connections.shutdownNow();
         this.requests.shutdownNow();
+        // Nothing is waited for: every connection it could still be watching has
+        // just been ended, so whatever is left to fire has nothing to evict
+        this.deadlines.shutdownNow();
         await(this.connections, deadline);
     }
 
@@ -877,6 +1020,7 @@ public final class RunnerServer implements Closeable {
         private final Socket socket;
         private final String host;
         private volatile SocketBridge bridge;
+        private volatile Runner runner;
         private volatile Thread thread;
 
         Connection(Socket socket, String host) {
@@ -899,15 +1043,33 @@ public final class RunnerServer implements Closeable {
         /**
          * Ends this connection from the outside.
          *
-         * Closing the bridge is what does it — that takes both sockets down and
-         * completes the future the connection thread is parked on. The interrupt
-         * is for the window before there is a bridge: a thread sitting in the
-         * handshake, whose socket has just been closed underneath it.
+         * <b>The runner first, its transport after.</b> Tearing the runner down is
+         * what half-closes its log streams, and half-closing them only works while
+         * there is still a channel to do it on: dropping the transport first left
+         * every one of those streams to die of its own accord a moment later, one
+         * failure line per processor on the way out of a perfectly orderly
+         * shutdown. Telling the runner first means it has closed its handlers
+         * before the transport goes, and what arrives after that is the routine
+         * teardown status a closed handler stays quiet about.
+         *
+         * Closing the bridge is what actually ends the connection — that takes
+         * both sockets down and completes the future the connection thread is
+         * parked on. The interrupt is for the window before there is a bridge: a
+         * thread sitting in the handshake, whose socket has just been closed
+         * underneath it.
          */
         void cancel() {
-            SocketBridge current = this.bridge;
+            Runner current = this.runner;
             if (current != null) {
-                current.close();
+                // The same shape gRPC would report a moment later anyway, only in
+                // time to be useful
+                current.onError(new StatusRuntimeException(
+                        Status.UNAVAILABLE.withDescription("the runner server is shutting down")));
+            }
+
+            SocketBridge transport = this.bridge;
+            if (transport != null) {
+                transport.close();
             } else {
                 closeQuietly(this.socket, "orchestrator socket");
             }

@@ -1,7 +1,9 @@
 package io.github.rdfc;
 
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -11,6 +13,7 @@ import java.util.logging.Logger;
 import com.google.protobuf.Empty;
 
 import io.github.rdfc.helpers.StreamObserverWrapper;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import rdfc.RunnerGrpc;
 import rdfc.Service.LogMessage;
@@ -20,16 +23,29 @@ import rdfc.Service.LogMessage;
 public class GrpcLogHandler extends Handler
         implements StreamObserver<Empty> {
     /**
-     * For the one thing this class may say through a Logger: that a stream ended
-     * after its handler was closed.
+     * Where everything this class has to say about its own stream goes.
      *
      * Safe only because it is <b>named</b>. A GrpcLogHandler is only ever added to
      * the anonymous logger {@link #loggerFor} builds, so nothing this logger's
      * records reach is a GrpcLogHandler and the record cannot come back in here.
-     * Everything else on the response side still goes to stderr — see the note
-     * there.
+     * That is what lets {@link #onError} report through a Logger — formatted like
+     * every other line, filterable, and testable — rather than writing straight to
+     * stderr past the handler this runner installed.
      */
     private static final Logger LOGGER = Logger.getLogger(GrpcLogHandler.class.getName());
+
+    /**
+     * The statuses a log stream ends with when the teardown ended it.
+     *
+     * Half-closing the call and then dropping the channel is exactly what the
+     * runner does on its way out, and gRPC answers it here with one of these — one
+     * per handler, so a pipeline with ten processors used to end in ten failure
+     * lines. After {@link #close()} these are the shutdown finishing and are
+     * logged at FINE. Any other status <em>after</em> a close is not routine and
+     * is still reported, see {@link #onError}.
+     */
+    private static final Set<Status.Code> ROUTINE_TEARDOWN = EnumSet.of(Status.Code.UNAVAILABLE,
+            Status.Code.CANCELLED);
 
     public static final Map<Level, String> LEVEL_TO_STRING;
 
@@ -209,9 +225,10 @@ public class GrpcLogHandler extends Handler
         try {
             this.stream.onCompleted();
         } catch (Exception e) {
-            // Not through a Logger: this handler is where logging ends up, so that
-            // would come straight back in here
-            System.err.println("Completing the log stream to the orchestrator failed: " + e);
+            // Through the named LOGGER, like everything else this class says about
+            // its own stream: that logger has no handler of this class on it, so
+            // the record cannot come back in here
+            LOGGER.log(Level.WARNING, "Completing the log stream to the orchestrator failed: " + e, e);
         }
     }
 
@@ -229,9 +246,8 @@ public class GrpcLogHandler extends Handler
     // None of these three may throw, and none of them may log through a logger this
     // handler is on: this handler *is* where logging ends up, so that would come
     // straight back in here (and, on a stream that just died, keep failing). What
-    // an operator has to see goes to stderr; the one line that is merely
-    // diagnostic goes through the named LOGGER above, which no handler of this
-    // class is attached to.
+    // they have to say goes through the named LOGGER above, which no handler of
+    // this class is attached to.
 
     @Override
     public void onNext(Empty value) {
@@ -243,23 +259,49 @@ public class GrpcLogHandler extends Handler
      * The log stream died. Everything logged from here on is dropped, sending it
      * would only raise the same failure again.
      *
-     * A stream that dies <em>after</em> this handler was closed is the teardown
-     * finishing, not a fault: half-closing the call and then dropping the channel
-     * is exactly what the runner does on its way out, and gRPC answers it with an
-     * UNAVAILABLE here. Saying so on stderr turned a clean shutdown into a wall of
-     * failure lines, one per handler. Only what happens on a stream nobody closed
-     * is worth the operator's attention.
+     * How loudly that is reported depends on <em>when</em> it happened and on
+     * <em>what</em> gRPC said:
+     *
+     * <ul>
+     * <li>on a stream nobody closed it is a fault, whatever the status, and it is
+     * reported at WARNING,</li>
+     * <li>after {@link #close()} with one of {@link #ROUTINE_TEARDOWN} it is the
+     * teardown finishing — the runner half-closed this call and then dropped the
+     * channel — and it goes to FINE. Saying it out loud turned every clean
+     * shutdown into a wall of failure lines, one per handler,</li>
+     * <li>after {@link #close()} with any other status something went wrong that a
+     * close does not explain, and demoting <em>that</em> to FINE would hide it.
+     * WARNING as well.</li>
+     * </ul>
+     *
+     * Through the named LOGGER in every case, never straight to stderr: the record
+     * cannot come back into this handler (see the note on that field), and going
+     * through a Logger keeps this line formatted and filtered like all the others.
      */
     @Override
     public void onError(Throwable t) {
         this.broken = true;
 
-        if (this.closed.get()) {
+        if (this.closed.get() && isRoutineTeardown(t)) {
             LOGGER.log(Level.FINE, "the log stream to the orchestrator ended after this handler was closed", t);
             return;
         }
 
-        System.err.println("The log stream to the orchestrator failed: " + t);
+        LOGGER.log(Level.WARNING, "The log stream to the orchestrator failed: " + t, t);
+    }
+
+    /**
+     * Whether a failure is one of the statuses a teardown produces by itself.
+     *
+     * Anything that is not a gRPC status at all is not: this is only ever asked
+     * about a stream that was closed on purpose, and a failure that did not come
+     * from the transport is not explained by that close.
+     *
+     * @param t what ended the stream, may be null
+     * @return true for the statuses in {@link #ROUTINE_TEARDOWN}
+     */
+    private static boolean isRoutineTeardown(Throwable t) {
+        return t != null && ROUTINE_TEARDOWN.contains(Status.fromThrowable(t).getCode());
     }
 
     @Override

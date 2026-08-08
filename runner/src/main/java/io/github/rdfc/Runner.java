@@ -370,9 +370,16 @@ public class Runner implements StreamObserver<ToRunner> {
         // an end of stream instead of waiting for data that will never arrive
         this.quietly("closing the readers", () -> this.readers.values().forEach(Reader::close));
         this.quietly("closing the loaded jars", this::closeJars);
-        // Late, so every step above it can still report on the log stream, but
-        // before the callback: in the CLI that shuts the channel down, and a log
-        // stream cannot be half-closed on a channel that is gone
+        // Late, so every step above it can still report on the log stream — none
+        // of them touches the channel — but before the callback: in the CLI that
+        // shuts the channel down, and a log stream cannot be half-closed on a
+        // channel that is gone.
+        //
+        // The same holds for whoever calls this from outside. A server that drops
+        // a connection's transport has to tear its runner down *first*: these
+        // handlers can only be closed quietly while the channel is still there,
+        // and a stream that dies before its handler was closed is reported as the
+        // fault it would be anywhere else. See RunnerServer's Connection.cancel.
         this.quietly("closing the log streams", this::closeLogStreams);
         this.quietly("running the completion callback", this.onComplete::run);
 

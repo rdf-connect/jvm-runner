@@ -59,6 +59,12 @@ class ConnectionFlowTest {
         return this.server;
     }
 
+    private RunnerServer start(Path dir, int maxConnections, long establishMillis) throws Exception {
+        this.server = new RunnerServer(ServerFixture.config(dir), 0, 0, maxConnections, establishMillis);
+        this.server.start();
+        return this.server;
+    }
+
     private Socket connect() throws IOException {
         Socket socket = new Socket(LOOPBACK, this.server.boundGrpcPort());
         socket.setSoTimeout(10_000);
@@ -77,6 +83,33 @@ class ConnectionFlowTest {
     private static boolean closedByPeer(Socket socket) {
         try {
             return socket.getInputStream().read() < 0;
+        } catch (SocketTimeoutException e) {
+            return false;
+        } catch (IOException e) {
+            // Reset rather than a clean close; from here that is the same answer
+            return true;
+        }
+    }
+
+    /**
+     * The same question for a connection that got as far as having a bridge.
+     *
+     * {@link #closedByPeer} reads one byte and asks whether it was the end; past
+     * the handshake there is something to read first — the runner's channel put
+     * its HTTP/2 preface and a SETTINGS frame on this socket before anything went
+     * wrong — so the answer only comes after draining it.
+     *
+     * @param socket the orchestrator's end
+     * @return true when the peer closed it, false when it went quiet instead
+     */
+    private static boolean atEndOfStream(Socket socket) throws IOException {
+        socket.setSoTimeout(5_000);
+        byte[] chunk = new byte[4096];
+        try {
+            while (socket.getInputStream().read(chunk) >= 0) {
+                // gRPC talking to an orchestrator that never was one
+            }
+            return true;
         } catch (SocketTimeoutException e) {
             return false;
         } catch (IOException e) {
@@ -147,6 +180,39 @@ class ConnectionFlowTest {
         Map<String, Object> gone = snapshot.get(0);
         assertEquals("error", gone.get("status"), "a connection that dropped mid-run was reported as a clean end");
         assertNotNull(gone.get("disconnectedAt"), "the runner was never marked as disconnected");
+    }
+
+    /**
+     * A peer that gets past the handshake and then goes silent is evicted.
+     *
+     * The handshake budget covers the IRI line and nothing else, so writing one
+     * line used to buy a connection slot for as long as this process ran: no read
+     * timeout on the pumps, no deadline on the channel, nothing waiting on a
+     * clock. Thirty-two of these and the server was closed for business until
+     * somebody restarted it.
+     *
+     * The deadline is a constructor parameter here for the obvious reason — the
+     * real one is {@link RunnerServer#ESTABLISH_MILLIS} and this test would
+     * otherwise take half a minute to watch a socket not be spoken on.
+     */
+    @Test
+    void aConnectionThatNeverEstablishesIsEvicted(@TempDir Path dir) throws Exception {
+        start(dir, RunnerServer.MAX_GRPC_CONNECTIONS, 500);
+
+        Socket socket = connect();
+        // A perfectly good IRI line, and then never a byte of HTTP/2: the channel
+        // this server dials back never reaches READY
+        write(socket, "urn:test:silent\n");
+
+        ServerFixture.await(() -> !this.server.state().snapshot().isEmpty(), "the runner is registered");
+
+        ServerFixture.await(() -> this.server.activeConnections() == 0, "the connection slot is handed back");
+        assertTrue(atEndOfStream(socket), "the socket of an evicted connection was left open");
+
+        List<Map<String, Object>> snapshot = this.server.state().snapshot();
+        assertEquals(1, snapshot.size(), "the evicted runner was not kept in the history");
+        assertEquals("error", snapshot.get(0).get("status"), "an eviction was reported as a clean end");
+        assertNotNull(snapshot.get(0).get("disconnectedAt"), "the runner was never marked as disconnected");
     }
 
     /**

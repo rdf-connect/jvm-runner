@@ -124,6 +124,16 @@ public final class SocketBridge implements Closeable {
         // depend on that, and works on any socket it is handed.
         orchestrator.setSoTimeout(0);
 
+        // The one thing that still notices a peer that is simply gone. There is
+        // no read timeout here by design — a pipeline may legitimately be quiet
+        // for hours — so a host that was powered off, or a NAT that dropped the
+        // mapping, would otherwise leave this pump reading from a connection
+        // nobody is on the other end of, for as long as this process runs. The
+        // interval is the operating system's (two hours by default on Linux),
+        // which is far too slow to be a liveness check and exactly right as a
+        // backstop.
+        orchestrator.setKeepAlive(true);
+
         // Backlog 1: one connection is all this will ever serve
         this.listener = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
         this.port = this.listener.getLocalPort();

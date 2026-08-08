@@ -7,18 +7,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
-import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import org.junit.jupiter.api.Test;
 
 import com.google.protobuf.Empty;
 
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import rdfc.Service.LogMessage;
 
@@ -27,8 +30,14 @@ import rdfc.Service.LogMessage;
  * custom levels, and the protobuf setter then threw an NPE from inside logging.
  */
 class GrpcLogHandlerTest {
-    /** What the handler says on stderr when a live log stream dies. */
+    /** What the handler says when a log stream dies and that is worth knowing. */
     private static final String FAILURE_LINE = "The log stream to the orchestrator failed";
+
+    /**
+     * Where the handler says it. Named, and no handler of the class under test is
+     * ever on it — which is what makes it safe for that class to log at all.
+     */
+    private static final Logger HANDLER_LOGGER = Logger.getLogger(GrpcLogHandler.class.getName());
 
     /** The levels the orchestrator (winston) accepts. */
     private static final Set<String> WINSTON_LEVELS = Set.of("error", "warn", "info", "http", "verbose", "debug",
@@ -159,17 +168,22 @@ class GrpcLogHandlerTest {
     }
 
     /**
-     * A stream that fails on a handler that is still open is a fault, and the
-     * operator gets told on stderr.
+     * A stream that fails on a handler that is still open is a fault, and it is
+     * reported loudly — through the named logger, not past every handler onto raw
+     * stderr.
      */
     @Test
-    void aStreamThatFailsWhileOpenIsReportedOnStderr() {
+    void aStreamThatFailsWhileOpenIsReportedLoudly() {
         var handler = new GrpcLogHandler(new CapturingStream(), "http://example.org/runner");
+        var failure = unavailable();
 
-        var printed = whileCapturingStderr(() -> handler.onError(new IllegalStateException("UNAVAILABLE")));
+        var records = whileCapturingRecords(() -> handler.onError(failure));
 
-        assertTrue(printed.contains(FAILURE_LINE), "a live log stream failed without a word: " + printed);
-        assertTrue(printed.contains("UNAVAILABLE"), "the failure was reported without saying what it was");
+        var warnings = at(records, Level.WARNING);
+        assertEquals(1, warnings.size(), "a live log stream failed without a word");
+        assertTrue(warnings.get(0).getMessage().contains(FAILURE_LINE), warnings.get(0).getMessage());
+        assertTrue(warnings.get(0).getMessage().contains("UNAVAILABLE"),
+                "the failure was reported without saying what it was: " + warnings.get(0).getMessage());
     }
 
     /**
@@ -182,22 +196,120 @@ class GrpcLogHandlerTest {
     void aStreamThatFailsAfterAnIntentionalCloseIsQuiet() {
         var handler = new GrpcLogHandler(new CapturingStream(), "http://example.org/runner");
         handler.close();
+        var failure = unavailable();
 
-        var printed = whileCapturingStderr(() -> handler.onError(new IllegalStateException("UNAVAILABLE")));
+        var printed = new StringBuilder();
+        var records = whileCapturingRecords(
+                () -> printed.append(whileCapturingStderr(() -> handler.onError(failure))));
 
-        assertFalse(printed.contains(FAILURE_LINE), "a closed log stream still complained on stderr: " + printed);
+        assertEquals(0, at(records, Level.WARNING).size(), "a closed log stream still complained");
+        assertEquals(1, at(records, Level.FINE).size(), "the routine end was not even noted at FINE");
+        // And nothing reached the console either: the FINE record does not clear
+        // the level the console handler runs at, and nothing here goes past it
+        assertFalse(printed.toString().contains(FAILURE_LINE),
+                "a closed log stream still complained on stderr: " + printed);
+        assertEquals("", printed.toString(), "a routine teardown printed something after all: " + printed);
     }
 
-    /** Runs the action with stderr redirected, and hands back what it wrote. */
+    /** CANCELLED is the other status a teardown produces by itself. */
+    @Test
+    void aCancelledStreamAfterACloseIsQuietToo() {
+        var handler = new GrpcLogHandler(new CapturingStream(), "http://example.org/runner");
+        handler.close();
+
+        var records = whileCapturingRecords(
+                () -> handler.onError(new StatusRuntimeException(Status.CANCELLED)));
+
+        assertEquals(0, at(records, Level.WARNING).size(), "a cancelled log stream complained after a close");
+    }
+
+    /**
+     * Being closed is not a licence to swallow everything. A close explains
+     * UNAVAILABLE and CANCELLED; it explains nothing about an INTERNAL, and
+     * demoting that to FINE would hide a real fault behind a clean shutdown.
+     */
+    @Test
+    void aRealFaultAfterACloseIsStillReported() {
+        var handler = new GrpcLogHandler(new CapturingStream(), "http://example.org/runner");
+        handler.close();
+        var failure = new StatusRuntimeException(Status.INTERNAL.withDescription("frame size exceeded"));
+
+        var records = whileCapturingRecords(() -> handler.onError(failure));
+
+        var warnings = at(records, Level.WARNING);
+        assertEquals(1, warnings.size(), "a genuine fault was demoted because the handler happened to be closed");
+        assertTrue(warnings.get(0).getMessage().contains("INTERNAL"), warnings.get(0).getMessage());
+    }
+
+    /** The failure gRPC reports when a channel is dropped under an open call. */
+    private static StatusRuntimeException unavailable() {
+        return new StatusRuntimeException(Status.UNAVAILABLE.withDescription("Channel shutdownNow invoked"));
+    }
+
+    private static List<LogRecord> at(List<LogRecord> records, Level level) {
+        var out = new ArrayList<LogRecord>();
+        for (var record : records) {
+            if (record.getLevel().equals(level)) {
+                out.add(record);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Runs the action with everything the handler's own logger says collected.
+     *
+     * The logger is opened up to ALL for the duration: the FINE line is the whole
+     * point of one of these tests, and at the default level a Logger drops it
+     * before any handler sees it.
+     */
+    private static List<LogRecord> whileCapturingRecords(Runnable action) {
+        var records = new ArrayList<LogRecord>();
+        var collector = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+
+        var level = HANDLER_LOGGER.getLevel();
+        HANDLER_LOGGER.setLevel(Level.ALL);
+        HANDLER_LOGGER.addHandler(collector);
+        try {
+            action.run();
+        } finally {
+            HANDLER_LOGGER.removeHandler(collector);
+            HANDLER_LOGGER.setLevel(level);
+        }
+        return records;
+    }
+
+    /**
+     * Runs the action with stderr redirected, and hands back what it wrote.
+     *
+     * The root logger's handlers are built first, on purpose: a ConsoleHandler
+     * takes hold of whatever {@code System.err} is when it is constructed, so one
+     * that happens to be built inside this window would keep writing into a buffer
+     * this method is about to throw away — for the rest of the JVM, and so for
+     * every test after this one.
+     */
     private static String whileCapturingStderr(Runnable action) {
+        Logger.getLogger("").getHandlers();
+
         var original = System.err;
         var captured = new ByteArrayOutputStream();
         try {
-            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8.name()));
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
             action.run();
             System.err.flush();
-        } catch (UnsupportedEncodingException e) {
-            throw new AssertionError("UTF-8 is not optional", e);
         } finally {
             System.setErr(original);
         }

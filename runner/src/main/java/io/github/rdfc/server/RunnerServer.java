@@ -465,7 +465,7 @@ public final class RunnerServer implements Closeable {
         // socket to close and a registration to undo on the way out
         String id = null;
         SocketBridge bridge = null;
-        AtomicReference<ScheduledFuture<?>> establishment = new AtomicReference<>();
+        AtomicReference<ScheduledFuture<?>> check = new AtomicReference<>();
         try {
             id = this.state.registerRunner(connection.host, uri);
             bridge = new SocketBridge(connection.socket, handshake.remainder());
@@ -478,11 +478,14 @@ public final class RunnerServer implements Closeable {
             // Armed before the channel is watched, so the callback that disarms it
             // always finds it — and before the runner exists, because constructing
             // that is what starts the stream this waits for
-            AtomicBoolean established = new AtomicBoolean();
-            establishment.set(this.evictUnlessEstablished(bridge, uri, connection.host, established));
+            Establishment establishment = new Establishment();
+            check.set(this.evictUnlessEstablished(bridge, uri, connection.host, establishment));
             this.watchChannel(channel, id, () -> {
-                if (established.compareAndSet(false, true)) {
-                    cancel(establishment.get());
+                if (establishment.establish()) {
+                    // Best-effort only, and that is all it has to be: a check that
+                    // is already running has lost the gate above and will not close
+                    // anything
+                    cancel(check.get());
                 }
             });
 
@@ -513,9 +516,8 @@ public final class RunnerServer implements Closeable {
             LOGGER.log(Level.WARNING, "Runner connection from " + connection.host + " failed", t);
         } finally {
             // Whether it fired, was disarmed or never got armed at all: a
-            // connection that is over has no deadline left to miss, and a check
-            // that runs anyway would report an eviction that is not one
-            cancel(establishment.get());
+            // connection that is over has no deadline left to miss
+            cancel(check.get());
 
             // Null when the registration itself was what failed: there is nothing
             // to move into the history, only a socket to let go of
@@ -531,6 +533,56 @@ public final class RunnerServer implements Closeable {
     }
 
     /**
+     * Which of the two ends of a connection's unestablished phase got there first.
+     *
+     * Two things race for the same connection and exactly one of them may win: the
+     * channel reaching READY, and the deadline running out. They are not ordered by
+     * anything — the READY callback comes off a gRPC thread, the deadline off the
+     * scheduler — and the losing side has to do nothing at all, which is why this
+     * is a decision and not a flag.
+     *
+     * A flag was not enough. The check read it once on the way in and then went on
+     * to log and close, so a READY landing anywhere inside that window found a
+     * connection that was about to be evicted for not being established, and
+     * cancelling the check could not help: {@code cancel(false)} does not stop a
+     * task that is already running. Here the check closes nothing unless its own
+     * compare-and-set won, so the window has no width.
+     */
+    static final class Establishment {
+        private enum Phase {
+            /** Neither has happened yet. */
+            PENDING,
+            /** The stream came up; there is nothing left to evict. */
+            ESTABLISHED,
+            /** The deadline won; this connection is being dropped. */
+            EVICTING
+        }
+
+        private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.PENDING);
+
+        /**
+         * The stream came up.
+         *
+         * @return true for the caller that got there first, and only then. False
+         *         once an eviction is already under way — that connection is being
+         *         taken down and a late READY does not call it back.
+         */
+        boolean establish() {
+            return this.phase.compareAndSet(Phase.PENDING, Phase.ESTABLISHED);
+        }
+
+        /**
+         * The deadline ran out.
+         *
+         * @return true when this caller may go ahead and drop the connection, false
+         *         when the stream came up first
+         */
+        boolean evict() {
+            return this.phase.compareAndSet(Phase.PENDING, Phase.EVICTING);
+        }
+    }
+
+    /**
      * Schedules the one check that ends a connection which never came up.
      *
      * Closing the bridge is all it takes: that completes {@link SocketBridge#done()},
@@ -542,18 +594,21 @@ public final class RunnerServer implements Closeable {
      * A single check rather than a poll: there is exactly one moment worth looking
      * at, and until it arrives there is nothing to see.
      *
-     * @param bridge      the transport to drop when the deadline passes
-     * @param uri         of the runner, for the log
-     * @param host        it connected from, for the log
-     * @param established set once the stream came up; the check is a no-op then
+     * Nothing is logged before the gate is won either, so the warning is only ever
+     * about a connection that really is being dropped.
+     *
+     * @param bridge        the transport to drop when the deadline passes
+     * @param uri           of the runner, for the log
+     * @param host          it connected from, for the log
+     * @param establishment decides between this check and the stream coming up
      * @return the scheduled check, or null when this server is stopping and every
      *         connection is being ended anyway
      */
     private ScheduledFuture<?> evictUnlessEstablished(SocketBridge bridge, String uri, String host,
-            AtomicBoolean established) {
+            Establishment establishment) {
         try {
             return this.deadlines.schedule(() -> {
-                if (established.get()) {
+                if (!establishment.evict()) {
                     return;
                 }
                 LOGGER.warning("Runner " + uri + " from " + host + " did not establish its stream within "
@@ -568,12 +623,16 @@ public final class RunnerServer implements Closeable {
     }
 
     /**
+     * Disarms a scheduled check, if there is one.
+     *
+     * Best effort by design, and not interrupting: whether the check runs is not
+     * what decides anything — {@link Establishment} is — so a check that is already
+     * running is left to finish and find that it lost.
+     *
      * @param scheduled a scheduled check, may be null when none was ever armed
      */
     private static void cancel(ScheduledFuture<?> scheduled) {
         if (scheduled != null) {
-            // Not interrupting: a check that is already closing a bridge has to
-            // finish doing that
             scheduled.cancel(false);
         }
     }

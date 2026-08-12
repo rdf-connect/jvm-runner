@@ -2,10 +2,13 @@ package io.github.rdfc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -144,6 +147,65 @@ class RunnerLifecycleTest {
         assertEquals(0, processor.produceCalls.get());
         assertEquals(0, runner.awaiting());
         assertEquals(1, runner.completions.get(), "the runner has to finish exactly once");
+
+        // And a run in which a processor never started is not a run that succeeded
+        assertTrue(runner.completion().isCompletedExceptionally(),
+                "a failed init was reported as an orderly completion");
+        assertTrue(failureOf(runner).getMessage().contains("init blew up"),
+                "the completion does not say what went wrong: " + failureOf(runner));
+    }
+
+    /**
+     * The regression this file exists for: a processor that fails before any
+     * sibling's `proc` message has arrived hands its two callbacks back onto a
+     * counter nobody else is holding, so that give-back <em>is</em> the zero that
+     * ends this runner.
+     *
+     * That is the same zero the last processor of a finished pipeline produces, and
+     * it used to be reported as one: {@code completion()} completed normally, and in
+     * server mode the connection was marked DONE and logged as "completed" for a
+     * pipeline of which not one processor ever ran.
+     */
+    @Test
+    void aFailedInitWithNoSiblingsYetIsNotAnOrderlyCompletion() {
+        var orchestrator = new FakeOrchestrator();
+        var runner = TestRunner.create(orchestrator, "http://example.org/runner/lifecycle-first-proc-fails");
+
+        // Nothing registered for this URI, so startProc throws synchronously inside
+        // onNext — a jar whose URL answers 404 fails in exactly that place
+        runner.onNext(proc(PROC));
+
+        assertEquals(0, runner.awaiting());
+        assertEquals(1, runner.completions.get(), "the runner has to finish exactly once");
+
+        assertTrue(runner.completion().isCompletedExceptionally(),
+                "a pipeline that never started was reported as one that ran");
+        assertTrue(failureOf(runner).getMessage().contains("no processor registered for " + PROC),
+                "the completion does not name the failure: " + failureOf(runner));
+
+        // And the orchestrator was told which processor failed, before the stream
+        // was taken down under it
+        var reported = initialized(orchestrator);
+        assertEquals(1, reported.size());
+        assertEquals(PROC, reported.get(0).getUri());
+        assertTrue(reported.get(0).getError().getCause().contains("no processor registered"),
+                "the failing processor was not reported: " + reported.get(0).getError().getCause());
+
+        // The report went out before the goodbye: a message sent onto a stream that
+        // was already half-closed never reaches the orchestrator at all
+        var messages = sent(orchestrator);
+        assertTrue(messages.get(messages.size() - 1).hasInitialized(),
+                "the failure was reported before the stream was torn down, but not last on it");
+        assertEquals(1, orchestrator.goodbyesOn(RunnerGrpc.getConnectMethod()),
+                "the runner did not take leave of a stream that was still up");
+    }
+
+    /** The failure a runner's completion carries. */
+    private static Throwable failureOf(TestRunner runner) {
+        var failure = assertThrows(ExecutionException.class,
+                () -> runner.completion().get(5, TimeUnit.SECONDS),
+                "the completion did not fail");
+        return failure.getCause();
     }
 
     @Test
@@ -168,6 +230,12 @@ class RunnerLifecycleTest {
         assertEquals(0, broken.produceCalls.get());
         assertEquals(0, runner.awaiting());
         assertEquals(1, runner.completions.get());
+
+        // The sibling ran to the end, but the pipeline did not: one of its
+        // processors never started, so this is not an orderly completion
+        assertTrue(runner.completion().isCompletedExceptionally(),
+                "a run with a processor that never initialized was reported as a success");
+        assertTrue(failureOf(runner).getMessage().contains("init blew up"), failureOf(runner).toString());
     }
 
     /**
@@ -201,6 +269,11 @@ class RunnerLifecycleTest {
         assertEquals(0, runner.awaiting());
         assertEquals(1, runner.completions.get(), "the runner never noticed it had nothing left to wait for");
         assertEquals(0, broken.produceCalls.get());
+
+        // Ending on a failed init is ending on a failure, whichever processor's
+        // callback happened to be the last one back
+        assertTrue(runner.completion().isCompletedExceptionally());
+        assertTrue(failureOf(runner).getMessage().contains("init blew up"), failureOf(runner).toString());
     }
 
     /**
@@ -343,8 +416,9 @@ class RunnerLifecycleTest {
         assertTrue(ack.hasError());
         // The failure travelled here through a CompletableFuture, so it arrived
         // wrapped in a CompletionException. The orchestrator shows this string to a
-        // user, so it carries the cause and nothing else.
-        assertEquals("consumer blew up", ack.getError());
+        // user, so it carries the cause — its type and its message — and none of the
+        // future plumbing around it.
+        assertEquals("RuntimeException: consumer blew up", ack.getError());
     }
 
     @Test

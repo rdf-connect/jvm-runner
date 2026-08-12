@@ -1,21 +1,29 @@
 package io.github.rdfc.server;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.List;
+import java.util.logging.Logger;
 
 /**
- * Where the HTTP server's root maps onto.
+ * Where the HTTP server's root maps onto: the directory of the configuration
+ * document, and never anything above it.
  *
  * Not the process' working directory — that is wherever the server happened to
- * be started from and has nothing to do with the files it serves. The root is
- * the deepest directory that contains the configuration document <em>and</em>
- * every whitelisted file, because the index document advertises each processor
- * catalogue as a path relative to this root: a root that does not contain a
- * served file would advertise an IRI with {@code ..} in it, which RFC 3986
- * clients normalize away before sending, so they end up asking for a path this
- * server then refuses to serve.
+ * be started from and has nothing to do with the files it serves. And not the
+ * common ancestor of everything that is whitelisted either, which is what this
+ * used to be: the whitelist follows {@code owl:imports <file:...>} wherever on
+ * disk it points, so one processor description importing
+ * {@code /opt/ontologies/shapes.ttl} moved the root up to {@code /} — putting
+ * absolute filesystem paths in a public document and turning
+ * {@link ServedJars}' "the file has to resolve inside the serving root" into a
+ * check that holds for every file on the machine.
+ *
+ * The operator names the configuration, so the directory it sits in is the tree
+ * they chose to expose, and that is the widest this server ever serves. A
+ * whitelisted file outside it stays whitelisted — it was reachable enough to be
+ * parsed, and its imports are part of the served set — but it cannot be
+ * advertised in the index or handed out over HTTP, and that is said once, at
+ * startup, rather than left to be discovered as a 403.
  */
 public final class ServeRoot {
     private ServeRoot() {
@@ -24,86 +32,24 @@ public final class ServeRoot {
     /**
      * The root to serve a configuration and its whitelist from.
      *
-     * @param configDir directory of the server configuration document
+     * @param configDir directory of the server configuration document, canonical
      * @param whitelist every file that may be served, canonical
+     * @param log       where to report the files this root cannot reach
      * @return the directory the HTTP root maps onto
      */
-    public static Path of(Path configDir, Collection<Path> whitelist) {
-        if (whitelist.isEmpty()) {
-            return configDir;
-        }
+    public static Path of(Path configDir, Collection<Path> whitelist, Logger log) {
+        Path root = configDir.toAbsolutePath().normalize();
 
-        List<Path> all = new ArrayList<>(whitelist.size() + 1);
-        all.add(configDir);
-        all.addAll(whitelist);
-        return commonPath(all);
-    }
-
-    /**
-     * The deepest path that is an ancestor of, or equal to, every given path.
-     *
-     * Files may be passed in as they are: a file contributes its own name as a
-     * component, and since the configuration <em>directory</em> is always part of
-     * the input in practice, the answer is a directory.
-     *
-     * @param paths the paths, all absolute and on the same file system root
-     * @return their common prefix
-     * @throws IllegalArgumentException when the collection is empty, when a path is
-     *                                  relative, or when they do not share a root
-     */
-    public static Path commonPath(Collection<Path> paths) {
-        if (paths.isEmpty()) {
-            throw new IllegalArgumentException("Cannot take the common path of nothing");
-        }
-
-        Path root = null;
-        List<String> common = null;
-
-        for (Path path : paths) {
-            Path candidate = path.toAbsolutePath().normalize();
-            Path candidateRoot = candidate.getRoot();
-            if (candidateRoot == null) {
-                throw new IllegalArgumentException("Not an absolute path: " + path);
+        for (Path file : whitelist) {
+            if (!file.toAbsolutePath().normalize().startsWith(root)) {
+                // Named by the operator or imported by something they named, so
+                // this is worth a line: it is served by nobody, and an
+                // orchestrator that needs it will fail on a missing import
+                log.warning("The whitelisted file " + file + " lies outside the serving root " + root
+                        + ", so it is unreachable over HTTP; move it under " + root + " to have it served");
             }
-
-            if (root == null) {
-                root = candidateRoot;
-                common = components(candidate);
-                continue;
-            }
-
-            if (!root.equals(candidateRoot)) {
-                // Only reachable on Windows, where C:\ and D:\ have no common ancestor
-                throw new IllegalArgumentException("Paths on different roots: " + root + " and " + candidateRoot);
-            }
-
-            List<String> next = components(candidate);
-            int shared = 0;
-            int limit = Math.min(common.size(), next.size());
-            while (shared < limit && common.get(shared).equals(next.get(shared))) {
-                shared++;
-            }
-            common = common.subList(0, shared);
         }
 
-        Path result = root;
-        for (String name : common) {
-            result = result.resolve(name);
-        }
-        return result;
-    }
-
-    /**
-     * The name components of a path, root excluded.
-     *
-     * @param path an absolute, normalized path
-     * @return its components, outermost first
-     */
-    private static List<String> components(Path path) {
-        List<String> names = new ArrayList<>(path.getNameCount());
-        for (Path name : path) {
-            names.add(name.toString());
-        }
-        return names;
+        return root;
     }
 }

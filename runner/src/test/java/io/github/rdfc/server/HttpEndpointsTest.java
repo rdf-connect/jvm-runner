@@ -141,6 +141,59 @@ class HttpEndpointsTest {
     }
 
     /**
+     * The whitelist follows {@code owl:imports} wherever they point, so it names
+     * files the operator never put in the tree they chose to expose. Those stay on
+     * the whitelist — the walk had to read them, and what they import belongs to
+     * the served set — but the serving root does not move up to swallow them, and
+     * they are not handed out.
+     */
+    @Test
+    void aWhitelistedFileOutsideTheConfigDirectoryIsNotServed() throws Exception {
+        Path area = Files.createDirectories(this.root.resolve("clamped"));
+        Path conf = Files.createDirectories(area.resolve("conf"));
+
+        // Next to the configuration directory, not under it
+        Path shapes = area.resolve("shapes.ttl");
+        Files.write(shapes, "# an ontology outside the configuration directory\n".getBytes(UTF_8));
+
+        Files.write(conf.resolve("echo.ttl"), String.join("\n",
+                "@prefix rdfc: <https://w3id.org/rdf-connect#>.",
+                "@prefix owl: <http://www.w3.org/2002/07/owl#>.",
+                "<> owl:imports <" + shapes.toRealPath().toUri() + ">.",
+                "<http://example.org/ClampedEcho> rdfc:javaImplementationOf <http://example.org/EchoDefinition>;",
+                "  rdfc:jar \"echo.jar\";",
+                "  rdfc:class \"org.example.Echo\".",
+                "").getBytes(UTF_8));
+
+        Path config = conf.resolve("server.ttl");
+        Files.write(config, String.join("\n",
+                "@prefix rdfc: <https://w3id.org/rdf-connect#>.",
+                "<> a rdfc:JvmRunnerServer;",
+                "  rdfc:httpPort 8080;",
+                "  rdfc:grpcPort 4001;",
+                "  rdfc:hostname \"example.org\";",
+                "  rdfc:processorConfig <./echo.ttl>.",
+                "").getBytes(UTF_8));
+
+        RunnerServer clamped = new RunnerServer(ServerConfig.parse(config), 0, 0,
+                RunnerServer.MAX_GRPC_CONNECTIONS);
+        clamped.start();
+        try {
+            assertEquals(conf.toRealPath(), clamped.serveRoot(), "an import out of the tree widened the root");
+            assertTrue(clamped.whitelist().contains(shapes.toRealPath()),
+                    "the import is still whitelisted, it is only not reachable");
+
+            int port = clamped.boundHttpPort();
+            assertEquals(200, request("GET", "/echo.ttl", port).status);
+            assertEquals(403, request("GET", "/../shapes.ttl", port).status,
+                    "a whitelisted file outside the serving root was handed out");
+            assertEquals(403, request("GET", "/%2e%2e/shapes.ttl", port).status);
+        } finally {
+            clamped.shutdown();
+        }
+    }
+
+    /**
      * A path that resolves to nothing is refused the same way a path that
      * resolves to an unserved file is — which is what the py-runner does, and
      * deliberately: whether a file this server does not serve happens to exist is
@@ -195,12 +248,16 @@ class HttpEndpointsTest {
      * @return the answer
      */
     private Response request(String method, String rawPath) throws IOException {
-        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), this.server.boundHttpPort())) {
+        return request(method, rawPath, this.server.boundHttpPort());
+    }
+
+    private static Response request(String method, String rawPath, int port) throws IOException {
+        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), port)) {
             socket.setSoTimeout(10_000);
 
             OutputStream out = socket.getOutputStream();
             out.write((method + " " + rawPath + " HTTP/1.1\r\n"
-                    + "Host: localhost:" + this.server.boundHttpPort() + "\r\n"
+                    + "Host: localhost:" + port + "\r\n"
                     + "Connection: close\r\n\r\n").getBytes(US_ASCII));
             out.flush();
 

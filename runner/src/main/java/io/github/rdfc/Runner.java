@@ -98,6 +98,24 @@ public class Runner implements StreamObserver<ToRunner> {
     protected final ObjectMapper mapper;
 
     private final AtomicInteger awaiting = new AtomicInteger(0);
+
+    /**
+     * The first init that failed, or null while none has.
+     *
+     * A processor claims its two callbacks the moment its `proc` message arrives,
+     * so a processor that fails to initialize before its siblings' `proc` messages
+     * are in hands both back onto a counter nobody else is holding yet — and that
+     * zero is what ends this runner. Without this field that ending is
+     * indistinguishable from the orderly one, and a pipeline whose very first
+     * processor could not be loaded is reported as a pipeline that ran: the
+     * completion future completes normally and, in server mode, the connection is
+     * marked DONE.
+     *
+     * So the zero check asks this first: a run in which an init failed never
+     * finished its work, whichever processor's callback happened to land last. The
+     * first failure wins, because it is the one that explains the rest.
+     */
+    private final AtomicReference<Throwable> initFailure = new AtomicReference<>();
     /**
      * Function to call when all processors are finished.
      * This will close the GRPC channel.
@@ -123,8 +141,9 @@ public class Runner implements StreamObserver<ToRunner> {
     private final List<LogStream> loggers = new CopyOnWriteArrayList<>();
 
     /**
-     * Completes when this runner is done: normally when every processor finished,
-     * exceptionally when the connection to the orchestrator ended before that.
+     * Completes when this runner is done: normally when every processor ran,
+     * exceptionally when a processor never got past its init or when the
+     * connection to the orchestrator ended before the work was finished.
      */
     private final CompletableFuture<Void> completion = new CompletableFuture<>();
 
@@ -287,9 +306,10 @@ public class Runner implements StreamObserver<ToRunner> {
     /**
      * Completes when this runner is done and has released everything it held.
      *
-     * It completes normally when every processor finished, and exceptionally when
-     * the orchestrator connection ended before that — which is a normal event, not
-     * a reason to bring the JVM down.
+     * It completes normally when every processor ran to the end, and exceptionally
+     * when it did not: a processor that never made it past its init, or an
+     * orchestrator connection that ended before the work was finished — both of
+     * which are normal events, not reasons to bring the JVM down.
      *
      * @return the future, the same one on every call
      */
@@ -327,7 +347,16 @@ public class Runner implements StreamObserver<ToRunner> {
         // One atomic step, so exactly one caller can ever observe the zero
         var v = this.awaiting.addAndGet(-callbacks);
         if (v == 0) {
-            this.finish(null);
+            // Read after the decrement, and set before it, so whoever observes the
+            // zero also observes the failure that got there first — see
+            // {@link #initFailure}. Null on the ordinary path, and then this is the
+            // orderly completion it has always been.
+            //
+            // The goodbye on the stream is sent either way: this runner is done
+            // with a connection that is still up, and the orchestrator was already
+            // told which processor failed, on this very stream, before the callback
+            // that ends up here was handed back.
+            this.finish(this.initFailure.get(), true);
         }
     }
 
@@ -347,13 +376,30 @@ public class Runner implements StreamObserver<ToRunner> {
      * @param error what ended this runner, or null when it simply finished its work
      */
     private void finish(Throwable error) {
+        // Only the orderly end says goodbye: on a broken connection there is
+        // nothing left to say it on, and half-closing a dead call throws.
+        this.finish(error, error == null);
+    }
+
+    /**
+     * Ends this runner, exactly once, and says whether there is still a stream to
+     * take leave on.
+     *
+     * The two are not the same question. This runner having nothing left to wait
+     * for is one thing — and then the stream is up and is half-closed, whether the
+     * work ended in a failure or not; the connection having died under it is
+     * another, and then there is nothing to send anything on.
+     *
+     * @param error      what ended this runner, or null when it simply finished its
+     *                   work
+     * @param sayGoodbye whether to half-close the main stream on the way out
+     */
+    private void finish(Throwable error, boolean sayGoodbye) {
         if (!this.finished.compareAndSet(false, true)) {
             return;
         }
 
-        if (error == null) {
-            // Only on the orderly end: on a broken connection there is nothing left
-            // to say goodbye on, and half-closing a dead call throws.
+        if (sayGoodbye) {
             this.quietly("completing the stream", this.stream::onCompleted);
         }
 
@@ -625,12 +671,18 @@ public class Runner implements StreamObserver<ToRunner> {
         // message may not chain a produce on it either
         initialized.completeExceptionally(error);
 
+        // Before the callbacks are handed back, because handing them back can be
+        // what ends this runner and whoever ends it reads this to decide whether
+        // the run was a success — see {@link #initFailure}
+        this.initFailure.compareAndSet(null, Errors.unwrap(error));
+
         try {
-            // Reported before the callbacks are handed back: that hand-back can be
-            // what ends this runner, and then the stream is completed and nothing can
-            // be sent on it anymore.
+            // Both before the callbacks are handed back: that hand-back can be what
+            // ends this runner, and then the stream is completed and nothing can be
+            // sent on it anymore — neither the report nor a log record.
             // The root cause, like the acknowledgements: the orchestrator shows this
             // string to a user
+            this.logger.severe("Processor " + uri + " failed to initialize: " + Errors.describe(error));
             this.sendProcInit(uri, Optional.of(Errors.describe(error)));
         } catch (Exception e) {
             this.logger.severe("Could not report the failed init of " + uri + ": " + e);

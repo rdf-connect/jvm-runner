@@ -94,6 +94,12 @@ started from a shell, a service manager or a container. A `rdfc:processorConfig`
 machine (a relative path or a `file:` IRI); an `http:` one is refused. A server with no
 `rdfc:processorConfig` still accepts runners, it just advertises no processors, and says so on startup.
 
+The HTTP root maps onto the **directory of the configuration document**, and never anything above it. What
+is served out of it is what the processor descriptions name: each `rdfc:processorConfig` and, transitively,
+every `owl:imports <file:…>` they declare about themselves. An imported file that sits outside that
+directory cannot be addressed under the root, so it is not advertised and not served — the server says so
+once, at startup. Keep the shapes and ontologies your descriptions import under the configuration directory.
+
 Ports are refused rather than guessed at: a port that is already in use ends the process with exit code `1`
 and a line naming the property to change. Being called wrongly exits `2`.
 

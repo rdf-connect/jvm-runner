@@ -45,9 +45,19 @@ public final class Errors {
     /**
      * The one-line description of a failure, as the orchestrator gets to see it.
      *
+     * The type is named in front of the message, because for the failures this
+     * runner reports most often the type <em>is</em> the payload: a
+     * {@code ClassNotFoundException} carries the class name and nothing else, a
+     * {@code NoSuchFileException} a bare path, a {@code FileNotFoundException} a
+     * bare URL. Handing a user "rdfc.test.Echo" says nothing at all; handing them
+     * "ClassNotFoundException: rdfc.test.Echo" says what to fix.
+     *
+     * The simple name, not the qualified one: the package of an exception is
+     * noise in a message an orchestrator puts in front of somebody.
+     *
      * @param error the failure to describe, may be null
-     * @return the root cause's message, its type when it carries no message, or
-     *         null when null went in
+     * @return the root cause's type and message, its type alone when it carries no
+     *         message, or null when null went in
      */
     public static String describe(Throwable error) {
         var root = unwrap(error);
@@ -55,8 +65,14 @@ public final class Errors {
             return null;
         }
 
-        // Some exceptions carry no message, then fall back on the type name
+        // Empty for an anonymous class, and then there is no name to report
+        var type = root.getClass().getSimpleName();
+        if (type.isEmpty()) {
+            return root.toString();
+        }
+
+        // Some exceptions carry no message, then the type is the whole story
         var message = root.getMessage();
-        return message != null ? message : root.toString();
+        return message == null || message.isBlank() ? type : type + ": " + message;
     }
 }

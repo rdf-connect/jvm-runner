@@ -249,7 +249,7 @@ public final class RunnerServer implements Closeable {
         this.establishMillis = establishMillis;
 
         this.whitelist = Whitelist.build(config.processorConfigs(), LOGGER);
-        this.serveRoot = ServeRoot.of(config.configDir(), this.whitelist);
+        this.serveRoot = ServeRoot.of(config.configDir(), this.whitelist, LOGGER);
         this.state = new State(config.historySize());
         this.index = new IndexGenerator(config.processorConfigs(), this.serveRoot, config.hostname(),
                 config.grpcPort());
@@ -855,11 +855,17 @@ public final class RunnerServer implements Closeable {
      * Hands out one of the whitelisted files.
      *
      * The path is resolved and canonicalized, and what it resolves to has to be
-     * literally one of the whitelisted files — which is what makes {@code ..}
-     * segments and symlinks pointing out of the tree moot, rather than a prefix
-     * check on strings. A path that resolves to nothing cannot be whitelisted
-     * either, so it is refused the same way: whether a file this server does not
-     * serve exists is not something it should be answering.
+     * literally one of the whitelisted files <em>and</em> sit under the serving
+     * root — which is what makes {@code ..} segments and symlinks pointing out of
+     * the tree moot, rather than a prefix check on strings. A path that resolves
+     * to nothing cannot be whitelisted either, so it is refused the same way:
+     * whether a file this server does not serve exists is not something it should
+     * be answering.
+     *
+     * Both halves are needed. The whitelist is built by following
+     * {@code owl:imports} wherever they point, so it can name files outside the
+     * tree the operator chose to expose; those are not this server's to hand out,
+     * and the root is where that line is drawn — see {@link ServeRoot}.
      *
      * @param exchange the request
      * @param path     its path, percent-decoded, query string already dropped
@@ -878,7 +884,7 @@ public final class RunnerServer implements Closeable {
             LOGGER.fine("Cannot resolve " + path + " under " + this.serveRoot + ": " + e);
         }
 
-        if (real == null || !this.whitelist.contains(real)) {
+        if (real == null || !real.startsWith(this.serveRoot) || !this.whitelist.contains(real)) {
             return respond(exchange, 403, TEXT, "Forbidden");
         }
 

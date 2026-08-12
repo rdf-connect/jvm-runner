@@ -14,6 +14,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -213,6 +217,72 @@ class ConnectionFlowTest {
         assertEquals(1, snapshot.size(), "the evicted runner was not kept in the history");
         assertEquals("error", snapshot.get(0).get("status"), "an eviction was reported as a clean end");
         assertNotNull(snapshot.get(0).get("disconnectedAt"), "the runner was never marked as disconnected");
+    }
+
+    /**
+     * A connection that ends before it ever establishes is not announced as one
+     * being dropped for never establishing.
+     *
+     * The deadline check cannot be called back once it has started running —
+     * {@code cancel(false)} does not stop it — so a connection ending anywhere
+     * inside that window used to leave the check to find the phase unclaimed, win
+     * the eviction, and warn about dropping a connection that had already ended,
+     * on top of closing a bridge that was already closed. The connection thread
+     * now claims the phase on its way out, and a check that runs afterwards has
+     * nothing to say.
+     *
+     * The whole ordinary case is here too, not just the raced one: every
+     * connection that ends before its deadline goes through the same arm.
+     */
+    @Test
+    void aConnectionThatEndsBeforeEstablishingIsNotAnnouncedAsDropped(@TempDir Path dir) throws Exception {
+        long establishMillis = 1_500;
+        start(dir, RunnerServer.MAX_GRPC_CONNECTIONS, establishMillis);
+
+        List<String> logged = new CopyOnWriteArrayList<>();
+        Handler capture = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getMessage() != null) {
+                    logged.add(record.getMessage());
+                }
+            }
+
+            @Override
+            public void flush() {
+                // nothing is buffered
+            }
+
+            @Override
+            public void close() {
+                // nothing is held
+            }
+        };
+
+        Logger logger = Logger.getLogger(RunnerServer.class.getName());
+        logger.addHandler(capture);
+        try {
+            Socket socket = connect();
+            write(socket, "urn:test:brief\n");
+            ServerFixture.await(() -> !this.server.state().snapshot().isEmpty(), "the runner is registered");
+
+            // Well inside the deadline: this connection is over long before it
+            // could have missed anything
+            socket.close();
+            ServerFixture.await(() -> this.server.activeConnections() == 0, "the connection slot is handed back");
+
+            // And now past the moment the check was armed for, so a check that
+            // still had something to say has said it
+            Thread.sleep(establishMillis + 500);
+
+            assertTrue(
+                    logged.stream().noneMatch(
+                            message -> message.contains("urn:test:brief")
+                                    && message.contains("did not establish its stream")),
+                    "a connection that had already ended was announced as being dropped: " + logged);
+        } finally {
+            logger.removeHandler(capture);
+        }
     }
 
     /**

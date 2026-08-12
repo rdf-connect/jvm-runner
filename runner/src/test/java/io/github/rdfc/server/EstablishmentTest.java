@@ -11,19 +11,22 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * The gate between a connection coming up and its deadline running out.
+ * The gate between a connection coming up, its deadline running out, and its
+ * simply being over.
  *
  * Tested here rather than through a server, and on purpose. What has to hold is
- * that exactly one of the two sides ever wins, including when they arrive at the
- * same instant — and the instant is the point. Driving that through a real
+ * that exactly one of the three sides ever wins, including when they arrive at
+ * the same instant — and the instant is the point. Driving that through a real
  * connection would mean lining a gRPC channel reaching READY up against a
  * scheduled task to within microseconds, over and over, which is a test that
- * passes for reasons nobody can name and fails on a loaded machine. Two threads
+ * passes for reasons nobody can name and fails on a loaded machine. Three threads
  * on a barrier hit the window every round.
  *
  * The mechanism this protects: {@code cancel(false)} does not stop a task that is
  * already running, so a READY landing after the check started but before it
- * closed the bridge used to evict a connection that had just established itself.
+ * closed the bridge used to evict a connection that had just established itself —
+ * and a connection ending on its own inside that same window used to be announced
+ * as one being dropped for never coming up.
  */
 @Timeout(60)
 class EstablishmentTest {
@@ -39,6 +42,7 @@ class EstablishmentTest {
 
         assertTrue(establishment.establish(), "the first caller did not win the gate");
         assertFalse(establishment.evict(), "a connection that had come up was evicted anyway");
+        assertFalse(establishment.close(), "a connection that had come up closed the gate a second time");
     }
 
     @Test
@@ -48,39 +52,64 @@ class EstablishmentTest {
         assertTrue(establishment.evict(), "the deadline did not win an uncontested gate");
         assertFalse(establishment.establish(),
                 "a connection that was already being dropped reported itself established");
-    }
-
-    /** Neither side may win twice: the READY callback fires on every observation. */
-    @Test
-    void neitherSideWinsTwice() {
-        RunnerServer.Establishment establishment = new RunnerServer.Establishment();
-
-        assertTrue(establishment.establish());
-        assertFalse(establishment.establish(), "the gate was won twice by the same side");
-
-        RunnerServer.Establishment other = new RunnerServer.Establishment();
-        assertTrue(other.evict());
-        assertFalse(other.evict(), "the gate was won twice by the same side");
+        assertFalse(establishment.close(),
+                "a connection already being dropped claimed to have ended by itself");
     }
 
     /**
-     * The real case: both arrive at once, many times over.
+     * A connection that ends on its own closes the gate behind it.
      *
-     * Exactly one winner per round is the whole contract — the eviction only
-     * closes the bridge when its own call won, so a round with two winners is a
-     * connection that came up and was dropped for not coming up, and a round with
-     * none is a slot nobody ever hands back.
+     * Which is what keeps a check that was already running from announcing that a
+     * connection which had ended a moment earlier is being dropped for never
+     * coming up.
+     */
+    @Test
+    void theConnectionEndingFirstWins() {
+        RunnerServer.Establishment establishment = new RunnerServer.Establishment();
+
+        assertTrue(establishment.close(), "the connection end did not win an uncontested gate");
+        assertFalse(establishment.evict(), "a connection that had already ended was evicted anyway");
+        assertFalse(establishment.establish(), "a connection that had already ended reported itself established");
+    }
+
+    /** No side may win twice: the READY callback fires on every observation. */
+    @Test
+    void noSideWinsTwice() {
+        RunnerServer.Establishment established = new RunnerServer.Establishment();
+        assertTrue(established.establish());
+        assertFalse(established.establish(), "the gate was won twice by the same side");
+
+        RunnerServer.Establishment evicted = new RunnerServer.Establishment();
+        assertTrue(evicted.evict());
+        assertFalse(evicted.evict(), "the gate was won twice by the same side");
+
+        RunnerServer.Establishment closed = new RunnerServer.Establishment();
+        assertTrue(closed.close());
+        assertFalse(closed.close(), "the gate was won twice by the same side");
+    }
+
+    /**
+     * The real case: all three arrive at once, many times over.
+     *
+     * Exactly one winner per round is the whole contract — every arm acts only
+     * when its own call won, so a round with two winners is a connection that came
+     * up and was dropped for not coming up, or one that ended and was announced as
+     * dropped, and a round with none is a slot nobody ever hands back.
+     *
+     * All three race every round rather than a pair at a time: a round that pits
+     * them all against each other is a round that pits each pair against each
+     * other, and it does not need three tests to say so.
      */
     @Test
     void exactlyOneSideWinsWhenTheyRaceHeadOn() throws Exception {
         AtomicInteger established = new AtomicInteger();
         AtomicInteger evicted = new AtomicInteger();
-        AtomicInteger rounds = new AtomicInteger();
+        AtomicInteger closed = new AtomicInteger();
 
-        // Three parties: the two racers and this thread, which uses the barrier to
-        // hand out the next round only once both have finished the last one
-        CyclicBarrier start = new CyclicBarrier(3);
-        CyclicBarrier done = new CyclicBarrier(3);
+        // Four parties: the three racers and this thread, which uses the barrier to
+        // hand out the next round only once all of them have finished the last one
+        CyclicBarrier start = new CyclicBarrier(4);
+        CyclicBarrier done = new CyclicBarrier(4);
 
         RunnerServer.Establishment[] gate = new RunnerServer.Establishment[1];
 
@@ -94,31 +123,35 @@ class EstablishmentTest {
                 evicted.incrementAndGet();
             }
         }), "evicter");
+        Thread closer = new Thread(() -> race(start, done, () -> {
+            if (gate[0].close()) {
+                closed.incrementAndGet();
+            }
+        }), "closer");
 
-        establisher.setDaemon(true);
-        evicter.setDaemon(true);
-        establisher.start();
-        evicter.start();
+        for (Thread racer : new Thread[] { establisher, evicter, closer }) {
+            racer.setDaemon(true);
+            racer.start();
+        }
 
         for (int round = 0; round < ROUNDS; round++) {
             gate[0] = new RunnerServer.Establishment();
-            int before = established.get() + evicted.get();
+            int before = established.get() + evicted.get() + closed.get();
 
             start.await();
             done.await();
 
-            assertEquals(before + 1, established.get() + evicted.get(),
+            assertEquals(before + 1, established.get() + evicted.get() + closed.get(),
                     "round " + round + " did not have exactly one winner");
-            rounds.incrementAndGet();
         }
 
         establisher.interrupt();
         evicter.interrupt();
+        closer.interrupt();
 
-        assertEquals(ROUNDS, rounds.get());
         // Not asserting a distribution — the point is the invariant above, and a
         // scheduler that happens to favour one thread is not a failure
-        assertEquals(ROUNDS, established.get() + evicted.get());
+        assertEquals(ROUNDS, established.get() + evicted.get() + closed.get());
     }
 
     /**

@@ -680,10 +680,17 @@ public class Runner implements StreamObserver<ToRunner> {
             // Both before the callbacks are handed back: that hand-back can be what
             // ends this runner, and then the stream is completed and nothing can be
             // sent on it anymore — neither the report nor a log record.
-            // The root cause, like the acknowledgements: the orchestrator shows this
-            // string to a user
-            this.logger.severe("Processor " + uri + " failed to initialize: " + Errors.describe(error));
+            // The report goes first and the log after it, in its own try: the report
+            // is what tells the orchestrator which processor failed, and a logging
+            // handler that throws may not be what keeps it from being sent
             this.sendProcInit(uri, Optional.of(Errors.describe(error)));
+            try {
+                // The root cause, like the acknowledgements: the orchestrator shows
+                // this string to a user
+                this.logger.severe("Processor " + uri + " failed to initialize: " + Errors.describe(error));
+            } catch (Exception e) {
+                // Nothing left to log it with, and the failure is already reported
+            }
         } catch (Exception e) {
             this.logger.severe("Could not report the failed init of " + uri + ": " + e);
         } finally {

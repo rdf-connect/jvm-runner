@@ -3,7 +3,10 @@ package io.github.rdfc.server;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -15,6 +18,7 @@ import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * The serving root is what every advertised IRI is relative to and what the
@@ -111,5 +115,61 @@ class ServeRootTest {
                 Logger.getAnonymousLogger());
 
         assertEquals(Paths.get("/srv/conf"), root);
+    }
+
+    /**
+     * The containment test is on normalized paths on both sides, so a whitelist
+     * entry that is inside the tree but spelled with a {@code ..} in it is inside.
+     */
+    @Test
+    void normalizesTheWhitelistBeforeComparing() {
+        var recording = new Recording();
+
+        ServeRoot.of(Paths.get("/srv/conf"), List.of(Paths.get("/srv/conf/sub/../a.ttl")),
+                recordingInto(recording));
+
+        assertFalse(recording.warned("a.ttl"),
+                "a file inside the root was called unreachable because of a '..' in its name: "
+                        + recording.messages);
+    }
+
+    /**
+     * The invariant the containment checks depend on: everything measured against
+     * this root is a {@link Path#toRealPath} result, so the root has to be one too.
+     * A symlinked configuration directory used to leave that to whoever called this
+     * and 403 every served file when they did not.
+     */
+    @Test
+    void resolvesASymlinkedDirectoryToItsRealPath(@TempDir Path tmp) throws IOException {
+        Path real = Files.createDirectory(tmp.resolve("conf"));
+        Path file = Files.writeString(real.resolve("a.ttl"), "# a");
+        Path link = tmp.resolve("link");
+        try {
+            Files.createSymbolicLink(link, real);
+        } catch (IOException | UnsupportedOperationException e) {
+            assumeTrue(false, "this filesystem does not do symlinks: " + e);
+            return;
+        }
+
+        var recording = new Recording();
+        Path root = ServeRoot.of(link, List.of(file.toRealPath()), recordingInto(recording));
+
+        assertEquals(real.toRealPath(), root, "the symlink was left unresolved, so nothing under it serves");
+        assertTrue(file.toRealPath().startsWith(root),
+                "a file in the configuration directory failed the containment check the file handler makes");
+        assertFalse(recording.warned("unreachable"),
+                "a file under the root was reported as out of reach: " + recording.messages);
+    }
+
+    /**
+     * A configuration directory that is not on disk is no reason to refuse a start:
+     * the root is then as canonical as what it was handed, which is what it was
+     * before.
+     */
+    @Test
+    void fallsBackToTheAbsolutePathWhenTheDirectoryDoesNotExist(@TempDir Path tmp) {
+        Path absent = tmp.resolve("nowhere");
+
+        assertEquals(absent, ServeRoot.of(absent, Set.of(), Logger.getAnonymousLogger()));
     }
 }

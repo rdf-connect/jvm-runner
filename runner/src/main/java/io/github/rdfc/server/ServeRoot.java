@@ -1,5 +1,6 @@
 package io.github.rdfc.server;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.logging.Logger;
@@ -32,13 +33,23 @@ public final class ServeRoot {
     /**
      * The root to serve a configuration and its whitelist from.
      *
-     * @param configDir directory of the server configuration document, canonical
+     * The root is canonicalized here rather than assumed to arrive that way: the
+     * containment checks measured against it compare
+     * {@link Path#toRealPath(java.nio.file.LinkOption...)} results, so a caller
+     * handing in a symlinked directory would otherwise make every served file
+     * fail the check and 403 with nothing to go on. A directory that does not
+     * exist yet cannot be resolved and is not worth refusing a start over, so it
+     * falls back to an absolute, normalized path — the invariant is then as good
+     * as the caller's, which is what it used to be everywhere.
+     *
+     * @param configDir directory of the server configuration document
      * @param whitelist every file that may be served, canonical
      * @param log       where to report the files this root cannot reach
-     * @return the directory the HTTP root maps onto
+     * @return the directory the HTTP root maps onto, canonical where the
+     *         filesystem can say so
      */
     public static Path of(Path configDir, Collection<Path> whitelist, Logger log) {
-        Path root = configDir.toAbsolutePath().normalize();
+        Path root = canonical(configDir, log);
 
         for (Path file : whitelist) {
             if (!file.toAbsolutePath().normalize().startsWith(root)) {
@@ -51,5 +62,17 @@ public final class ServeRoot {
         }
 
         return root;
+    }
+
+    /** The real path of {@code dir}, or the best that can be said without one. */
+    private static Path canonical(Path dir, Logger log) {
+        try {
+            return dir.toRealPath();
+        } catch (IOException e) {
+            Path fallback = dir.toAbsolutePath().normalize();
+            log.fine("Cannot resolve the serving root " + dir + " on disk (" + e
+                    + "), serving from " + fallback + " instead");
+            return fallback;
+        }
     }
 }

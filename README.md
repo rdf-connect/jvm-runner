@@ -96,9 +96,13 @@ machine (a relative path or a `file:` IRI); an `http:` one is refused. A server 
 
 The HTTP root maps onto the **directory of the configuration document**, and never anything above it. What
 is served out of it is what the processor descriptions name: each `rdfc:processorConfig` and, transitively,
-every `owl:imports <file:…>` they declare about themselves. An imported file that sits outside that
-directory cannot be addressed under the root, so it is not advertised and not served — the server says so
-once, at startup. Keep the shapes and ontologies your descriptions import under the configuration directory.
+every `owl:imports <file:…>` they declare about themselves. A file that sits outside that directory cannot
+be addressed under the root, so it is not advertised and not served — the server says so once, at startup.
+That holds for imports and for the `rdfc:processorConfig` entries themselves alike: a `rdfc:processorConfig
+<../processors/echo.ttl>` is read and parsed, but the processors it declares are advertised in no index and
+the file is not served, so an orchestrator never gets to see them — the startup warnings name both the file
+and each processor left out. Keep the processor descriptions you name, and the shapes and ontologies they
+import, under the configuration directory.
 
 Ports are refused rather than guessed at: a port that is already in use ends the process with exit code `1`
 and a line naming the property to change. Being called wrongly exits `2`.

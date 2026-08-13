@@ -1,9 +1,9 @@
 package io.github.rdfc;
 
 import com.google.protobuf.ByteString;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -42,7 +42,12 @@ public interface IReader {
      * are missing.
      */
     public static abstract class Iter<T> {
-        protected List<Function<T, CompletableFuture<?>>> callbacks = new ArrayList<>();
+        /**
+         * Callbacks are registered while a processor initializes and iterated over
+         * from the gRPC callback threads that deliver the data, so this list is
+         * copy-on-write.
+         */
+        protected List<Function<T, CompletableFuture<?>>> callbacks = new CopyOnWriteArrayList<>();
         /**
          * endFuture is a CompletableFuture that resolves when the corresponding stream
          * closes.
@@ -53,7 +58,11 @@ public interface IReader {
             return new Iter<B>() {
                 public CompletableFuture<Void> on(Function<B, CompletableFuture<?>> f) {
                     Iter.this.callbacks.add(apply.andThen(f));
-                    return endFuture;
+                    // Iter.this, not the inherited field: this anonymous Iter is never
+                    // pushed to and never ended — only the one it wraps is — so its own
+                    // endFuture would never complete, and a processor whose transform
+                    // returns it would never finish.
+                    return Iter.this.endFuture;
                 }
             };
         }

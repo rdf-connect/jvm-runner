@@ -1,3 +1,11 @@
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'jvm-runner'
+
 include 'runner'
 include 'types'
-
+// Fixture, not a published artifact: the processors the CLI test pipeline and the
+// end-to-end test bed under tests/e2e/ run.
+include 'test-processor'

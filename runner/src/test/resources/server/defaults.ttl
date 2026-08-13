@@ -1,0 +1,4 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+# Nothing but the type: every value falls back on its default.
+<> a rdfc:JvmRunnerServer.

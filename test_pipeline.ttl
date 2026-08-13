@@ -3,25 +3,67 @@
 @prefix rdfc: <https://w3id.org/rdf-connect#>.
 @prefix owl: <http://www.w3.org/2002/07/owl#>.
 
-<> owl:imports <./index.ttl>.
+# The CLI counterpart of tests/e2e/remote_pipeline.ttl: the same send -> echo ->
+# log chain, but run by the orchestrator's CommandRunner (rdfc:JvmRunner starts a
+# runner process) instead of by a runner server it connects to.
+#
+# It runs the processors out of `./test-processor` and the runner out of
+# `./jvm-runner.jar` (rdfc:JvmRunner's command downloads the published one when
+# that file is not there), so:
+#
+#   ./gradlew :runner:shadowJar :test-processor:jar
+#   cp runner/build/libs/runner-*-all.jar jvm-runner.jar
+#   npx @rdfc/orchestrator-js test_pipeline.ttl
+<> owl:imports <./runner/index.ttl>.
 <> a rdfc:Pipeline;
   rdfc:consistsOf [
     rdfc:instantiates rdfc:JvmRunner;
-    rdfc:processor <test>;
+    rdfc:processor <sendProc>, <echoProc>, <logProc>;
   ].
 
-<channel> a rdfc:Writer, rdfc:Reader.
-<test> a rdfc:TestProcessor;
-  rdfc:name "Arthur";
-  rdfc:reader <channel>;
-  rdfc:writer <channel>.
+<raw> a rdfc:Writer, rdfc:Reader.
+<data> a rdfc:Writer, rdfc:Reader.
 
-rdfc:TestProcessor rdfc:javaImplementationOf rdfc:Processor;
-  rdfc:class "rdfc.proc.Library";
-  rdfc:jar <./test-processor/lib/build/libs/lib.jar>.
+<sendProc> a rdfc:JvmSendProcessor;
+  rdfc:msg "Hello", "World";
+  rdfc:writer <raw>.
+
+<echoProc> a rdfc:JvmEchoProcessor;
+  rdfc:reader <raw>;
+  rdfc:writer <data>.
+
+<logProc> a rdfc:JvmLogProcessor;
+  rdfc:reader <data>.
+
+rdfc:JvmSendProcessor rdfc:javaImplementationOf rdfc:Processor;
+  rdfc:class "rdfc.test.SendProcessor";
+  rdfc:jar <./test-processor/build/libs/test-processor.jar>.
+
+rdfc:JvmEchoProcessor rdfc:javaImplementationOf rdfc:Processor;
+  rdfc:class "rdfc.test.EchoProcessor";
+  rdfc:jar <./test-processor/build/libs/test-processor.jar>.
+
+rdfc:JvmLogProcessor rdfc:javaImplementationOf rdfc:Processor;
+  rdfc:class "rdfc.test.LogProcessor";
+  rdfc:jar <./test-processor/build/libs/test-processor.jar>.
 
 [ ] a sh:NodeShape;
-  sh:targetClass rdfc:TestProcessor;
+  sh:targetClass rdfc:JvmSendProcessor;
+  sh:property [
+    sh:path rdfc:writer;
+    sh:name "writer";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:class rdfc:Writer;
+  ], [
+    sh:path rdfc:msg;
+    sh:name "msg";
+    sh:minCount 1;
+    sh:datatype xsd:string;
+  ].
+
+[ ] a sh:NodeShape;
+  sh:targetClass rdfc:JvmEchoProcessor;
   sh:property [
     sh:path rdfc:reader;
     sh:name "reader";
@@ -34,11 +76,14 @@ rdfc:TestProcessor rdfc:javaImplementationOf rdfc:Processor;
     sh:minCount 1;
     sh:maxCount 1;
     sh:class rdfc:Writer;
-  ], [
-    sh:path rdfc:name;
-    sh:name "name";
-    sh:minCount 1;
-    sh:maxCount 1;
-    sh:datatype xsd:string;
   ].
 
+[ ] a sh:NodeShape;
+  sh:targetClass rdfc:JvmLogProcessor;
+  sh:property [
+    sh:path rdfc:reader;
+    sh:name "reader";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:class rdfc:Reader;
+  ].

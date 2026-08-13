@@ -1,0 +1,26 @@
+// The processors the test pipelines run.
+//
+// This is a fixture, not a product: it is deliberately not published (see the
+// `unpublished` list in the root build) and deliberately a plain jar rather than a
+// fat one. Both test beds load it out of `build/libs/test-processor.jar` — the CLI
+// pipeline (`test_pipeline.ttl`) through a `file:` URL, the end-to-end test bed
+// (`tests/e2e/`) through a copy the runner server serves — and the only thing these
+// processors need beyond the JDK is the runner's own types, which the runner already
+// has on its class path.
+plugins {
+    id 'java'
+}
+
+// Both test beds name the jar; keeping the base name off the project version means
+// neither `test_pipeline.ttl` nor `tests/e2e/run-e2e.sh` has to be touched on a
+// release.
+tasks.jar {
+    archiveBaseName.set('test-processor')
+    archiveVersion.set('')
+}
+
+dependencies {
+    implementation project(path: ':types')
+    // For ByteString, the payload type of every reader and writer.
+    implementation 'com.google.protobuf:protobuf-java:4.28.2'
+}

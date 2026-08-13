@@ -1,6 +1,8 @@
 package io.github.rdfc.helpers;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.google.protobuf.ByteString;
@@ -19,7 +21,11 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
     public final CompletableFuture<Void> endingFuture = new CompletableFuture<>();
     public final Logger logger;
 
-    private int at = 0;
+    /**
+     * The control messages are sent from whichever thread finished handling a
+     * chunk, so the counter has to be atomic.
+     */
+    private final AtomicInteger at = new AtomicInteger(0);
 
     public StreamReaderHelper(Reader reader, RunnerStub stub, Logger logger) {
         this.logger = logger;
@@ -38,7 +44,7 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
      */
     public void sendStreamControlMessage() {
         SendingStreamControl control = SendingStreamControl.newBuilder()
-                .setStreamSequenceNumber(this.at++)
+                .setStreamSequenceNumber(this.at.getAndIncrement())
                 .build();
         this.sendingStream.onNext(control);
     }
@@ -48,10 +54,21 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
      */
     @Override
     public void onNext(DataChunk value) {
-        this.logger.finest("Receiving message StreamReaderHelper : " + value.getAllFields().keySet().toString());
+        if (this.logger.isLoggable(Level.FINEST)) {
+            this.logger.finest("Receiving message StreamReaderHelper : " + value.getAllFields().keySet().toString());
+        }
         this.consumingStream.chunk(value.getData());
     }
 
+    /**
+     * The stream carrying this message failed.
+     *
+     * The consumers are still closed, so they see an end of stream instead of
+     * waiting for chunks that are not coming, but the ending future carries the
+     * failure: the runner turns that future into the acknowledgement for this
+     * message, and an acknowledgement without an error tells the orchestrator the
+     * message was handled — which it was not.
+     */
     @Override
     public void onError(Throwable t) {
         this.logger.severe("Error " + t);
@@ -60,7 +77,7 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
                 this.logger.severe("Error closing stream after error: " + e);
                 e.printStackTrace(System.err);
             }
-            this.endingFuture.complete(null);
+            this.endingFuture.completeExceptionally(t);
         });
     }
 
@@ -71,6 +88,10 @@ public class StreamReaderHelper implements StreamObserver<Common.DataChunk> {
             if (e != null) {
                 this.logger.severe("Error closing stream: " + e);
                 e.printStackTrace(System.err);
+                // A consumer that failed on the last chunks failed to handle this
+                // message, exactly like one that fails on a plain message does
+                this.endingFuture.completeExceptionally(e);
+                return;
             }
             this.endingFuture.complete(null);
         });

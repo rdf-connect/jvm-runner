@@ -1,8 +1,8 @@
 package io.github.rdfc;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -14,8 +14,11 @@ import com.google.protobuf.ByteString;
  */
 public class Reader implements IReader {
     private final String id;
-    private final List<StreamIter<Iter<ByteString>>> streams = new ArrayList<>();
-    private final List<StreamIter<ByteString>> strings = new ArrayList<>();
+    // Consumers register while a processor initializes and are iterated over from
+    // the gRPC callback threads delivering the messages, so both lists are
+    // copy-on-write.
+    private final List<StreamIter<Iter<ByteString>>> streams = new CopyOnWriteArrayList<>();
+    private final List<StreamIter<ByteString>> strings = new CopyOnWriteArrayList<>();
     private final Logger logger;
 
     public Reader(String id, Logger logger) {
@@ -44,7 +47,7 @@ public class Reader implements IReader {
 
     @Override
     public Iter<String> strings() {
-        return this.buffers().transform(ByteString::toString);
+        return this.buffers().transform(ByteString::toStringUtf8);
     }
 
     /**

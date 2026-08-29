@@ -14,17 +14,25 @@ rdfc:JvmRunner a rdfc:Runner;
 
 [ ] a sh:NodeShape;
   sh:targetSubjectsOf rdfc:javaImplementationOf;
-  sh:property [
-    sh:path rdfc:jar;
-    sh:name "jar";
-    sh:minCount 1;
-    sh:maxCount 1;
-    sh:datatype xsd:string;
-  ], [
-    sh:path rdfc:class;
-    sh:name "clazz";
-    sh:minCount 1;
-    sh:maxCount 1;
-    sh:datatype xsd:string;
-  ].
+  sh:property <#jar>, <#class>.
+
+# A processor gives its jar as an IRI relative to its own definition rather than
+# as a string literal, so the datatype below is advisory: it tells the extraction
+# step to hand the value over as a string, and is not a claim about the term. The
+# annotation marks that one constraint as a warning and leaves sh:minCount fatal,
+# following SHACL 1.2 Core, section 3.1.4.
+#
+# These property shapes are named rather than blank because an annotation cannot
+# currently be written inside a blank node property list.
+<#jar> sh:path rdfc:jar;
+  sh:name "jar";
+  sh:minCount 1;
+  sh:maxCount 1;
+  sh:datatype xsd:string {| sh:severity sh:Warning |} .
+
+<#class> sh:path rdfc:class;
+  sh:name "clazz";
+  sh:minCount 1;
+  sh:maxCount 1;
+  sh:datatype xsd:string.
 

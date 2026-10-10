@@ -173,3 +173,7 @@ dependencies {
 * Fat JAR packaging ensures no dependency issues when running.
 * Publishing with JitPack allows others to use your processor directly via GitHub.
 
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

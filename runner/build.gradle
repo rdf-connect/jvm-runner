@@ -2,7 +2,7 @@ plugins {
     // Apply the java-library plugin for API and implementation separation.
     id 'java'
     id 'maven-publish'   // ← this is required for `publishing { ... }`
-    id("com.gradleup.shadow") version "9.2.2"
+    id("com.gradleup.shadow") version "9.6.1"
 }
 
 tasks.register("descriptorArtifact", Copy) {

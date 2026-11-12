@@ -19,7 +19,8 @@ rdfc:JvmRunner a rdfc:Runner;
     sh:name "jar";
     sh:minCount 1;
     sh:maxCount 1;
-    sh:datatype xsd:string;
+    sh:nodeKind sh:IRIOrLiteral;
+    sh:codeType xsd:string;
   ], [
     sh:path rdfc:class;
     sh:name "clazz";

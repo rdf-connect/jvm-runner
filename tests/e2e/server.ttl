@@ -1,0 +1,12 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+# The runner server the orchestrator connects to. grpcPort 4001 and not the
+# default 50051: the orchestrator binds its own gRPC server on 50051.
+<> a rdfc:JvmRunnerServer;
+  rdfc:httpPort 3000;
+  rdfc:grpcPort 4001;
+  rdfc:hostname "localhost";
+  rdfc:processorConfig
+    <./processors/send.ttl>,
+    <./processors/echo.ttl>,
+    <./processors/log.ttl>.

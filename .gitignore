@@ -51,3 +51,14 @@ Thumbs.db
 proto/
 output/
 .env
+
+# === End-to-end test bed (tests/e2e) ===
+# The orchestrator is installed with npm. package-lock.json is *not* ignored: it
+# pins the whole dependency tree, so two runs of the test bed drive the pipeline
+# with the same orchestrator.
+tests/e2e/node_modules/
+# Written by run-e2e.sh. Also covered by the *.jar and *.log rules above, but
+# named here so it is clear what the script leaves behind.
+tests/e2e/test-processor.jar
+tests/e2e/server.log
+tests/e2e/orchestrator.log

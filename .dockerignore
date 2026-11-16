@@ -1,0 +1,14 @@
+# Kept out of the build context. The Dockerfile copies only the modules the fat
+# jar is built from, so this is about what has to be *sent to the daemon*: a
+# stale local build tree would also shadow the one the image builds.
+**/build
+.gradle
+.git
+.idea
+.superpowers
+# 69 MB of orchestrator, installed by tests/e2e/run-e2e.sh, and never in the image.
+tests/e2e/node_modules
+*.log
+.DS_Store
+Dockerfile
+.dockerignore

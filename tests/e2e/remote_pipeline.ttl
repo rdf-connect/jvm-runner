@@ -1,0 +1,25 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+### Import the remote runner and its processors, served by the jvm-runner server.
+<> owl:imports <http://localhost:3000/>,
+  <http://localhost:3000/processors/send.ttl>,
+  <http://localhost:3000/processors/echo.ttl>,
+  <http://localhost:3000/processors/log.ttl>.
+
+<> a rdfc:Pipeline;
+  rdfc:consistsOf [
+    rdfc:processor <sendProc>, <echoProc>, <logProc>;
+    rdfc:instantiates <http://localhost:3000/jvmRunner>;
+  ].
+
+<sendProc> a rdfc:JvmSendProcessor;
+  rdfc:msg "Hello", "World";
+  rdfc:writer <raw>.
+
+<echoProc> a rdfc:JvmEchoProcessor;
+  rdfc:reader <raw>;
+  rdfc:writer <data>.
+
+<logProc> a rdfc:JvmLogProcessor;
+  rdfc:reader <data>.

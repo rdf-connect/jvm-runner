@@ -1,6 +1,8 @@
 package io.github.rdfc.helpers;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.google.protobuf.ByteString;
@@ -20,7 +22,15 @@ public class StreamWriterHelper extends Stream<ByteString>
     private final Logger logger;
     private final CompletableFuture<Void> acknowledged;
 
-    private CompletableFuture<Void> nextProcessed = new CompletableFuture<>();;
+    /**
+     * The future that the next incoming ReceivingStreamControl completes.
+     *
+     * Chunks are sent from producing threads while the control messages arrive on
+     * gRPC callback threads, so the accesses go through an AtomicReference. The
+     * first one is completed by the control message answering the identify.
+     */
+    private final AtomicReference<CompletableFuture<Void>> nextProcessed = new AtomicReference<>(
+            new CompletableFuture<>());
 
     private StreamWriterHelper(RunnerStub stub, CompletableFuture<Void> acknowledged, Logger logger) {
         this.logger = logger;
@@ -44,8 +54,11 @@ public class StreamWriterHelper extends Stream<ByteString>
     public static CompletableFuture<StreamWriterHelper> build(RunnerStub stub, String channel, String runner,
             CompletableFuture<Void> awknowledged, Logger logger) {
         var self = new StreamWriterHelper(stub, awknowledged, logger);
+        // Grab the future before identifying: the answering control message can
+        // arrive before identify returns.
+        var identified = self.nextProcessed.get();
         self.identify(channel, runner);
-        return self.nextProcessed.thenApply(_ignored -> self);
+        return identified.thenApply(_ignored -> self);
     }
 
     /**
@@ -71,19 +84,34 @@ public class StreamWriterHelper extends Stream<ByteString>
      */
     @Override
     public void onNext(ReceivingStreamControl value) {
-        this.logger.finest("Receiving message StreamWriterHelper : " + value.getAllFields().keySet().toString());
-        if (!this.nextProcessed.isDone()) {
-            this.nextProcessed.complete(null);
-        } else {
+        if (this.logger.isLoggable(Level.FINEST)) {
+            this.logger.finest("Receiving message StreamWriterHelper : " + value.getAllFields().keySet().toString());
+        }
+        // complete returns false when this future already completed, which means the
+        // control message has no chunk waiting for it.
+        if (!this.nextProcessed.get().complete(null)) {
             this.logger
                     .severe("Expected a waiting nextProcessed future, has this been already handled? : "
                             + value.getAllFields().keySet().toString());
         }
     }
 
+    /**
+     * The stream carrying this message failed.
+     *
+     * Two futures can have somebody waiting on them: the one the next
+     * ReceivingStreamControl would complete, which is what {@link #chunk} handed to
+     * the producer, and the one {@link #close} waits on. Both are failed — a
+     * producer that keeps waiting for a control message on a dead stream never
+     * finishes, and the phase it belongs to never ends.
+     */
     @Override
     public void onError(Throwable t) {
-        throw new UnsupportedOperationException("Unimplemented method 'onError'");
+        this.logger.severe("The stream message failed: " + Errors.describe(t));
+
+        // Both are no-ops when nothing was waiting on them
+        this.nextProcessed.get().completeExceptionally(t);
+        this.acknowledged.completeExceptionally(t);
     }
 
     @Override
@@ -104,13 +132,16 @@ public class StreamWriterHelper extends Stream<ByteString>
         var chunkMsg = DataChunk.newBuilder().setData(chunk).build();
         builder.setData(chunkMsg);
 
-        this.sendingStream.onNext(builder.build());
-        if (!this.nextProcessed.isDone()) {
+        var out = new CompletableFuture<Void>();
+        // Install the future _before_ sending: the ReceivingStreamControl answering
+        // this chunk can arrive on a gRPC thread before this method returns and
+        // would otherwise be dropped, leaving the producer waiting forever.
+        var previous = this.nextProcessed.getAndSet(out);
+        if (!previous.isDone()) {
             this.logger.severe("Next processed is still not done, are chunks sent too fast?");
         }
 
-        var out = new CompletableFuture<Void>();
-        this.nextProcessed = out;
+        this.sendingStream.onNext(builder.build());
         return out;
     }
 

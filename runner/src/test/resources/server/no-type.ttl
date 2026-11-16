@@ -1,0 +1,4 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+# A perfectly parsable document that simply is not a server configuration.
+<> rdfc:httpPort 3000.

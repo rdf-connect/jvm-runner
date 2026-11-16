@@ -1,0 +1,20 @@
+# Runs the end-to-end bed's server as a container instead of a local process.
+#
+# This directory is mounted read-only at /config, which is what the image serves:
+# server.ttl, processors/*.ttl and — because the processor descriptions name it —
+# test-processor.jar. That jar is a build output, so build and copy it before
+# `up`, exactly as run-e2e.sh does:
+#
+#   ./gradlew :test-processor:jar
+#   cp test-processor/build/libs/test-processor.jar tests/e2e/
+#
+# tests/e2e/run-e2e-docker.sh does all of that and then drives the pipeline.
+services:
+  jvm-runner:
+    build:
+      context: ../..
+    ports:
+      - "3000:3000"  # HTTP: index.ttl, processor descriptions, /health, /dashboard
+      - "4001:4001"  # gRPC: orchestrator-initiated runner connections
+    volumes:
+      - .:/config:ro

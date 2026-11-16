@@ -1,0 +1,11 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+# Both ways of naming a catalogue: a relative IRI, which the parser resolves
+# against this document, and a plain literal, which the config resolves against
+# this document's directory.
+<> a rdfc:JvmRunnerServer;
+  rdfc:httpPort 8080;
+  rdfc:grpcPort 4001;
+  rdfc:hostname "example.org";
+  rdfc:historySize -1;
+  rdfc:processorConfig <./processors/echo.ttl>, "processors/log.ttl".

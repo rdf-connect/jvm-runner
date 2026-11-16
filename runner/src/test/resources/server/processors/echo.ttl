@@ -1,0 +1,9 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+<http://example.org/Echo> a rdfc:Processor;
+  rdfc:javaImplementationOf <http://example.org/EchoDefinition>;
+  rdfs:label "Echo";
+  rdfs:comment "Sends back whatever it receives.";
+  rdfc:jar "echo.jar";
+  rdfc:class "org.example.Echo".

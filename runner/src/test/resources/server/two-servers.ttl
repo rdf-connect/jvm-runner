@@ -1,0 +1,7 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+<http://example.org/first> a rdfc:JvmRunnerServer;
+  rdfc:httpPort 3000.
+
+<http://example.org/second> a rdfc:JvmRunnerServer;
+  rdfc:httpPort 4000.

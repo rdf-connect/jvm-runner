@@ -12,13 +12,23 @@ allprojects {
     version = "0.0.4"
 }
 
+// Subprojects that are fixtures rather than artifacts. They are built and run by
+// the tests, never released, so they get neither maven-publish nor the sources and
+// javadoc jars that only exist to be published.
+def unpublished = ['test-processor'] as Set
+
 subprojects {
     apply plugin: 'java'
-    apply plugin: 'maven-publish'
+
+    if (!unpublished.contains(name)) {
+        apply plugin: 'maven-publish'
+    }
 
 	java {
-		withSourcesJar()
-		withJavadocJar()
+		if (!unpublished.contains(name)) {
+			withSourcesJar()
+			withJavadocJar()
+		}
 
         toolchain {
             languageVersion = JavaLanguageVersion.of(11)

@@ -1,0 +1,35 @@
+# The part of the served index document that never changes.
+#
+# It says two things. The subsumption chain tells an orchestrator that a
+# subject of rdfc:javaImplementationOf is a processor — an sds:Activity, and so
+# a prov:Activity — and the SHACL node shape tells it which two properties to
+# read off such a subject to be able to run it: the jar it lives in and the
+# class inside it. The shape is the one from runner/index.ttl, so a processor
+# description written for the CLI runner works verbatim here.
+@prefix prov: <http://www.w3.org/ns/prov#>.
+@prefix sds: <https://w3id.org/sds#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+sds:Activity rdfs:subClassOf prov:Activity.
+rdfc:Processor rdfs:subClassOf sds:Activity.
+sds:implementationOf rdfs:subPropertyOf rdfs:subClassOf.
+rdfc:javaImplementationOf rdfs:subPropertyOf sds:implementationOf.
+
+[ ] a sh:NodeShape;
+  sh:targetSubjectsOf rdfc:javaImplementationOf;
+  sh:property [
+    sh:path rdfc:jar;
+    sh:name "jar";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ], [
+    sh:path rdfc:class;
+    sh:name "clazz";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ].

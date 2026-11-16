@@ -1,0 +1,5 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+# A catalogue this server cannot serve: it is not a file on this machine.
+<> a rdfc:JvmRunnerServer;
+  rdfc:processorConfig <http://example.org/processors.ttl>.
